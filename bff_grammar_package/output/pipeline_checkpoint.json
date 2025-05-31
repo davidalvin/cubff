@@ -1,0 +1,6 @@
+{
+  "grammar_epochs_completed": [0, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816],
+  "last_grammar_epoch": 2816,
+  "rewrite_usage_started": false,
+  "rewrite_usage_completed_epochs": []
+}

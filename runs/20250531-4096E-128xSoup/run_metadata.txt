@@ -1,0 +1,23 @@
+=== Run Parameters ===
+NUM_PROGRAMS = 131072
+PROGRAM_SIZE = 128
+SPLIT_AT = [64]
+SEED = 0
+MUTATION_PROB = 262144
+ZERO_INIT = False
+EVAL_SELFREP = False
+PERMUTE_PROGRAMS = True
+FIXED_SHUFFLE = False
+SAVE_INTERVAL = 32
+CALLBACK_INTERVAL = 32
+MAX_EPOCHS = 4096
+
+=== Runtime Metrics ===
+Final Epoch = 4097
+Total Ops = 173107946270
+MOPS/s = 99.06
+Brotli Size = 1469750
+Bytes per Program = 11.21
+h0 Entropy = 6.3339
+Brotli bpb = 1.4017
+Entropy Gap = 4.9322

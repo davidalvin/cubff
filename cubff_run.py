@@ -1,7 +1,8 @@
 import os
 import random
 from bin import cubff  # Provides access to compiled C++ simulation code
-from bff_io_helpers import save_partial_soup_csv_raw, save_run_metadata
+from bff_grammar_package.grammar_core.io import save_partial_soup_csv_raw, save_run_metadata
+
 
 # === PARAMETERS ===
 NUM_PROGRAMS = 128*1024               # Total number of programs in the soup; 128 * 1024 is good default
@@ -13,14 +14,14 @@ ZERO_INIT = False                # If True, initialize soup with zeros instead o
 EVAL_SELFREP = False             # If True, run self-replication detection
 PERMUTE_PROGRAMS = True          # Randomly shuffle pairings each epoch
 FIXED_SHUFFLE = False            # Use deterministic shuffling scheme
-SAVE_INTERVAL = 512                # Save full soup snapshot every N epochs
-CALLBACK_INTERVAL = 512            # How often the callback runs
+SAVE_INTERVAL = 32                # Save full soup snapshot every N epochs
+CALLBACK_INTERVAL = 32            # How often the callback runs
 MAX_EPOCHS = 4096                   # Stop after this many epochs; 4096 is good default
 NUM_PROGRAMS_TO_PRINT = 10       # Show a few programs in the console each epoch
 NUM_PROGRAMS_TO_SAVE = 10        # Save a few programs to CSV each epoch
 
 # Create output directory for saved data
-RUN_NAME = "test_kgram_stats"
+RUN_NAME = "20250531-4096E-128xSoup"
 SAVE_PATH = f"./runs/{RUN_NAME}"
 os.makedirs(SAVE_PATH, exist_ok=True)
 
