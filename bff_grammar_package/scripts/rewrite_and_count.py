@@ -1,12 +1,14 @@
+# rewrite_and_count.py
+
 import os
 import json
 import argparse
-from collections import Counter, OrderedDict
+from collections import Counter
 from bff_grammar_package.grammar_core.io import load_soup, to_symbol_sequences
-from bff_grammar_package.grammar_core.grammar import rewrite_with_grammar
 from multiprocessing import Pool, cpu_count
 
-# === LOAD GRAMMARS ONCE (for reuse by worker processes) ===
+CHECKPOINT_FILE = "bff_grammar_package/output/rewrite_checkpoint.json"
+
 grammar_by_epoch = {}
 sorted_grammar_rules = {}
 
@@ -20,23 +22,21 @@ def load_grammars(grammar_dir, grammar_epochs):
             sorted_grammar_rules[epoch] = sorted(rules.items(), key=lambda kv: -len(kv[1]))
         print(f"✅ Grammar {epoch} loaded with {len(rules)} rules")
 
-    return grammar_by_epoch, sorted_grammar_rules
-
-def nearest_grammar(epoch: int, grammar_epochs, grammar_by_epoch, sorted_grammar_rules) -> tuple[dict, list[tuple[str, list[str]]]]:
+def nearest_grammar(epoch, grammar_epochs):
     nearest = min(grammar_epochs, key=lambda e: abs(e - epoch))
     return grammar_by_epoch[nearest], sorted_grammar_rules[nearest]
 
-def process_epoch(epoch: int, soup_dir, max_programs, grammar_epochs) -> dict:
+def process_epoch(epoch, soup_dir, max_programs, grammar_epochs):
     path = os.path.join(soup_dir, f"{epoch:010}.dat")
     if not os.path.exists(path):
         print(f"⚠️ Skipping missing file: {path}")
-        return {}
+        return epoch, {}
 
     print(f"🔄 Processing epoch {epoch}")
     raw = load_soup(path, max_programs=max_programs)
     seqs = to_symbol_sequences(raw, normalize_noops=True)
 
-    grammar, rules = nearest_grammar(epoch, grammar_epochs, grammar_by_epoch, sorted_grammar_rules)
+    grammar, rules = nearest_grammar(epoch, grammar_epochs)
 
     rewritten = []
     for prog in seqs:
@@ -58,29 +58,45 @@ def process_epoch(epoch: int, soup_dir, max_programs, grammar_epochs) -> dict:
 
     usage = Counter(sym for prog in rewritten for sym in prog if sym in grammar)
     print(f"✅ Epoch {epoch} done — {len(usage)} rules used")
-    return dict(usage)
+    return epoch, dict(usage)
 
-# === MAIN EXECUTION ===
+def load_checkpoint():
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_checkpoint(data):
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Rewrite programs using grammar and count rule usage")
-    parser.add_argument("--grammar-epochs", nargs="*", type=int, default=[30, 60, 90], help="Epochs for which grammars exist")
-    parser.add_argument("--soup-dir", type=str, default="runs/test_grammar_100", help="Directory containing soup .dat files")
-    parser.add_argument("--grammar-dir", type=str, default="bff_grammar_package/output/grammars", help="Directory containing grammar JSONs")
-    parser.add_argument("--output-file", type=str, default="bff_grammar_package/output/rule_usage_over_time.json", help="Path to save usage data JSON")
-    parser.add_argument("--start", type=int, default=1, help="Start epoch for rewriting")
-    parser.add_argument("--stop", type=int, default=100, help="Stop epoch for rewriting")
+    parser.add_argument("--grammar-epochs", nargs="*", type=int, default=[0, 256, 512], help="Epochs for which grammars exist")
+    parser.add_argument("--soup-dir", type=str, help="Directory containing soup .dat files")
+    parser.add_argument("--grammar-dir", type=str, help="Directory containing grammar JSONs")
+    parser.add_argument("--output-file", type=str, help="Path to save usage data JSON")
+    parser.add_argument("--start", type=int, help="Start epoch for rewriting")
+    parser.add_argument("--stop", type=int, help="Stop epoch for rewriting")
     parser.add_argument("--max-programs", type=int, default=5000, help="Max programs per soup file")
 
     args = parser.parse_args()
 
-    grammar_by_epoch, sorted_grammar_rules = load_grammars(args.grammar_dir, args.grammar_epochs)
+    checkpoint_data = load_checkpoint()
+    load_grammars(args.grammar_dir, args.grammar_epochs)
+    epochs = list(range(args.start, args.stop + 1, 32))
+    completed = set(checkpoint_data.get("completed_epochs", []))
+    pending = [e for e in epochs if e not in completed]
 
-    print(f"\n🚀 Starting parallel processing with {cpu_count()} CPUs")
-    epochs = list(range(args.start, args.stop + 1))
+    results = checkpoint_data.get("results", {})
 
+    print(f"\n🚀 Starting parallel processing for {len(pending)} epochs using {cpu_count()} CPUs")
     with Pool(processes=cpu_count()) as pool:
-        results = pool.starmap(process_epoch, [(epoch, args.soup_dir, args.max_programs, args.grammar_epochs) for epoch in epochs])
+        for epoch, usage in pool.starmap(process_epoch, [(e, args.soup_dir, args.max_programs, args.grammar_epochs) for e in pending]):
+            results[str(epoch)] = usage
+            completed.add(epoch)
+            save_checkpoint({"completed_epochs": sorted(completed), "results": results})
 
-    print(f"\n💾 Writing results to {args.output_file}")
+    print(f"\n💾 Writing final results to {args.output_file}")
     with open(args.output_file, "w") as f:
-        json.dump(results, f)
+        json.dump(results, f, indent=2)

@@ -1,2 +1,1 @@
-#!/bin/bash
-python3 -m bff_grammar_package.scripts.run_pipeline --soup-path runs/20250531-4096E-128xSoup --output-dir bff_grammar_package/output --start-epoch 0 --stop-epoch 4096 --step-size 256 --max-programs 5000 --min-frequency 100
+bff_grammar_package/scripts/run_pipeline.py --grammar-start 0 --grammar-stop 4096 --grammar-step 256 --minfreq 100 --minlen 2 --maxlen 8 --usage-start 0 --usage-stop 4096 --max-programs 5000 --soup-dir runs/20250531-4096E-128xSoup --grammar-dir bff_grammar_package/output/grammars --output bff_grammar_package/output --fps 5

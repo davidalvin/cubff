@@ -15,21 +15,23 @@ with open(args.input) as f:
     data = json.load(f)
 
 print("\U0001F4CA Preparing list of all grammar rules...")
-all_rules = sorted({rule for epoch_data in data for rule in epoch_data})
+all_rules = sorted({rule for epoch_data in data.values() for rule in epoch_data})
 print(f"✅ Found {len(all_rules)} unique grammar rules")
 
 print("\U0001F4C8 Building per-epoch rule usage matrix...")
 frame_counts = []
-for i, epoch_data in enumerate(data):
+sorted_epochs = sorted(map(int, data.keys()))
+for i, e in enumerate(sorted_epochs):
+    epoch_data = data[str(e)]
     counts = [epoch_data.get(rule, 0) for rule in all_rules]
     frame_counts.append(counts)
-    if i % 10 == 0 or i == len(data) - 1:
-        print(f"  Processed epoch {i + 1}/{len(data)}")
+    if i % 10 == 0 or i == len(sorted_epochs) - 1:
+        print(f"  Processed epoch {e} ({i + 1}/{len(sorted_epochs)})")
 
 print("\U0001F3A8 Setting up animation canvas...")
 fig, ax = plt.subplots(figsize=(12, 6))
 bar_container = ax.bar(all_rules, frame_counts[0])
-title = ax.set_title("Grammar Rule Usage – Epoch 0")
+title = ax.set_title(f"Grammar Rule Usage – Epoch {sorted_epochs[0]}")
 ax.set_ylim(0, max(max(fc) for fc in frame_counts) * 1.1)
 ax.set_ylabel("Usage Count")
 ax.set_xlabel("Grammar Rules")
@@ -39,7 +41,7 @@ def update(frame_idx):
     counts = frame_counts[frame_idx]
     for rect, h in zip(bar_container, counts):
         rect.set_height(h)
-    title.set_text(f"Grammar Rule Usage – Epoch {frame_idx + 1}")
+    title.set_text(f"Grammar Rule Usage – Epoch {sorted_epochs[frame_idx]}")
     return bar_container
 
 print("\U0001F39E️ Rendering animation...")
