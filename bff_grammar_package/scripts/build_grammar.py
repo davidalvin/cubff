@@ -3,12 +3,14 @@
 import argparse
 import os
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from bff_grammar_package.grammar_core.io import load_soup, to_symbol_sequences
 
-# Phrase is valid if:
-# - It does not start or end with "∅"
-# - It’s not fully made from existing rules
+# --------------------------
+# 🔍 Validity check for mined phrases
+# --------------------------
+# Rules can include ∅, but not at the start or end.
+# We also skip rules made entirely of other rules.
 def is_valid_phrase(phrase, existing_rules):
     if phrase[0] == "∅" or phrase[-1] == "∅":
         return False
@@ -16,7 +18,9 @@ def is_valid_phrase(phrase, existing_rules):
         return False
     return True
 
-# Count all symbolic phrases between min_len and max_len in each sequence
+# --------------------------
+# 🪓 Mine frequent phrases in rewritten sequences
+# --------------------------
 def mine_phrases(sequences, min_len, max_len):
     phrases = Counter()
     for i, seq in enumerate(sequences):
@@ -29,25 +33,48 @@ def mine_phrases(sequences, min_len, max_len):
                     phrases[phrase] += 1
     return phrases
 
-# Rewrite a sequence using greedy left-to-right rule matching
-def rewrite_sequence(seq, sorted_rules):
+# --------------------------
+# 🌲 Prefix Trie for Fast Rewrite
+# --------------------------
+class TrieNode:
+    def __init__(self):
+        self.children = {}
+        self.rule = None  # holds symbol like "G1"
+
+def build_trie(rules):
+    root = TrieNode()
+    for sym, rhs in rules.items():
+        node = root
+        for tok in rhs:
+            node = node.children.setdefault(tok, TrieNode())
+        node.rule = sym
+    return root
+
+def rewrite_sequence_with_trie(seq, trie_root):
     i = 0
     out = []
     while i < len(seq):
-        matched = False
-        for sym, rhs in sorted_rules:
-            ln = len(rhs)
-            if seq[i:i+ln] == rhs:
-                out.append(sym)
-                i += ln
-                matched = True
-                break
-        if not matched:
+        node = trie_root
+        j = i
+        best_match = None
+        best_len = 0
+        while j < len(seq) and seq[j] in node.children:
+            node = node.children[seq[j]]
+            j += 1
+            if node.rule:
+                best_match = node.rule
+                best_len = j - i
+        if best_match:
+            out.append(best_match)
+            i += best_len
+        else:
             out.append(seq[i])
             i += 1
     return out
 
-# Fully expand a rule by recursively replacing symbols with their definitions
+# --------------------------
+# 🔁 Fully expand a rule (e.g. G1 := G2 G3 → raw tokens)
+# --------------------------
 def fully_expand(rhs, grammar):
     result = []
     for tok in rhs:
@@ -57,7 +84,9 @@ def fully_expand(rhs, grammar):
             result.append(tok)
     return result
 
-# Load the most recent grammar from a prior epoch, for continuity
+# --------------------------
+# 📜 Load prior epoch’s grammar
+# --------------------------
 def load_previous_grammar(output_dir, current_epoch, step):
     prev_epoch = current_epoch - step
     if prev_epoch < 0:
@@ -71,6 +100,9 @@ def load_previous_grammar(output_dir, current_epoch, step):
     max_id = max(rule_ids) + 1 if rule_ids else 0
     return grammar, max_id
 
+# --------------------------
+# 🚀 Main: Loop over epochs, rewrite, mine, and save grammar
+# --------------------------
 def main():
     parser = argparse.ArgumentParser(description="Build grammar from soup")
     parser.add_argument("--start", type=int)
@@ -79,6 +111,7 @@ def main():
     parser.add_argument("--minfreq", type=int, default=100)
     parser.add_argument("--minlen", type=int, default=2)
     parser.add_argument("--maxlen", type=int, default=8)
+    parser.add_argument("--max-programs", type=int, default=None)
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument("--output-dir", type=str, required=True)
     args = parser.parse_args()
@@ -91,33 +124,31 @@ def main():
             print(f"✅ Grammar already exists for epoch {epoch}, skipping")
             continue
 
-        # Load previous grammar and get the next available rule ID
         grammar, rule_id = load_previous_grammar(args.output_dir, epoch, args.step)
         initial_rule_id = rule_id
 
-        # Load and preprocess soup
         path = os.path.join(args.input_dir, f"{epoch:010}.dat")
         if not os.path.exists(path):
             print(f"⚠️ Skipping missing file: {path}")
             continue
 
         print(f"\n📂 Epoch {epoch}: Loading soup from {path}")
-        soup = load_soup(path)
-        print(f"📦 Loaded {len(soup)} programs from soup")
+        soup = load_soup(path, max_programs=args.max_programs)
+        print(f"📦 Loaded {len(soup)} programs")
 
         sequences = to_symbol_sequences(soup, normalize_noops=True)
         print(f"🔠 Converted to {len(sequences)} symbol sequences")
 
-        # Rewrite programs with existing grammar
-        sorted_rules = sorted(grammar.items(), key=lambda kv: -len(kv[1]))
+        # Rewrite programs using trie
+        trie_root = build_trie(grammar)
         rewritten_sequences = []
         for idx, seq in enumerate(sequences):
             if idx % 1000 == 0 and idx > 0:
                 print(f"🔁 Rewriting sequence {idx}/{len(sequences)}")
-            rewritten_sequences.append(rewrite_sequence(seq, sorted_rules))
+            rewritten_sequences.append(rewrite_sequence_with_trie(seq, trie_root))
         print("✅ All sequences rewritten")
 
-        # Mine frequent phrases in rewritten code
+        # Phrase mining
         print("📊 Mining phrases...")
         phrases = mine_phrases(rewritten_sequences, args.minlen, args.maxlen)
         print(f"🔍 Found {len(phrases)} raw phrases; filtering for valid candidates...")
@@ -128,17 +159,16 @@ def main():
         ]
         print(f"🎯 {len(candidates)} phrases passed filtering (minfreq={args.minfreq})")
 
-        # Add new rules
+        # Add new grammar rules
         for phrase in candidates:
             rule_name = f"G{rule_id}"
             grammar[rule_name] = list(phrase)
-            expanded = fully_expand(list(phrase), grammar)
+            expanded = fully_expand(phrase, grammar)
             print(f"➕ {rule_name} := {' '.join(phrase)}   ⟶   {' '.join(expanded)}")
             rule_id += 1
 
         print(f"🧠 Added {rule_id - initial_rule_id} new rules this epoch")
 
-        # Save updated grammar
         with open(grammar_path, "w") as f:
             json.dump({"rules": grammar}, f)
         print(f"📀 Saved grammar with {len(grammar)} total rules to {grammar_path}")
