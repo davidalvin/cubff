@@ -5,6 +5,7 @@ import hashlib
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.colors as mcolors
+from numpy import log1p  # For log-scale
 
 # === Argument parsing ===
 parser = argparse.ArgumentParser(description="Animate rule usage over time")
@@ -13,6 +14,7 @@ parser.add_argument("--output", type=str, required=True, help="Path to save anim
 parser.add_argument("--grammar-dir", type=str, required=True, help="Directory containing grammar JSON files")
 parser.add_argument("--fps", type=int, default=5, help="Frames per second for animation")
 parser.add_argument("--max-rules", type=int, default=50, help="Maximum number of rules to display")
+parser.add_argument("--log-scale", action="store_true", help="Use log scale for rule frequencies")
 args = parser.parse_args()
 
 print("\U0001F4C2 Loading rule usage data...")
@@ -50,9 +52,8 @@ def fully_expand(rhs, grammar):
 
 # === Consistent color generator for rules ===
 def get_color_for_rule(rule_label):
-    """Generate a consistent RGB color for a rule label."""
     h = hashlib.md5(rule_label.encode()).hexdigest()
-    hue = int(h[:2], 16) / 255.0  # Hue between 0 and 1
+    hue = int(h[:2], 16) / 255.0
     return mcolors.hsv_to_rgb((hue, 0.6, 0.85))
 
 # === Prepare grammar rules and label map ===
@@ -87,31 +88,31 @@ if not frames:
 # === Setup figure and axis ===
 fig, ax = plt.subplots(figsize=(14, 0.4 * args.max_rules))
 labels_init = [label for label, _ in frames[0][1]]
-counts_init = [count for _, count in frames[0][1]]
+counts_init = [log1p(count) if args.log_scale else count for _, count in frames[0][1]]
 colors_init = [get_color_for_rule(label) for label in labels_init]
 
 ax.barh(range(len(labels_init)), counts_init, color=colors_init)
-ax.set_xlabel("Frequency")
+ax.set_xlabel("Log Frequency" if args.log_scale else "Frequency")
 ax.set_yticks(range(len(labels_init)))
 ax.set_yticklabels(labels_init, fontsize=8)
 title = ax.set_title(f"Grammar Rule Usage – Epoch {frames[0][0]}")
 
 # === Determine consistent x-axis limit ===
 all_counts = [count for _, label_counts in frames for _, count in label_counts]
-max_freq = max(all_counts) * 1.1
+max_freq = max(log1p(c) if args.log_scale else c for c in all_counts) * 1.1
 ax.set_xlim(0, max_freq)
 
 # === Animation update function ===
 def update(frame_idx):
     epoch, label_counts = frames[frame_idx]
     labels = [label for label, _ in label_counts]
-    counts = [count for _, count in label_counts]
+    counts = [log1p(count) if args.log_scale else count for _, count in label_counts]
     colors = [get_color_for_rule(label) for label in labels]
 
     ax.clear()
     ax.barh(range(len(labels)), counts, color=colors)
     ax.set_xlim(0, max_freq)
-    ax.set_xlabel("Frequency")
+    ax.set_xlabel("Log Frequency" if args.log_scale else "Frequency")
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_title(f"Grammar Rule Usage – Epoch {epoch}")
