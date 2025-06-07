@@ -88,6 +88,7 @@ struct SimulationState {
   std::array<std::pair<std::string, float>, 16> frequent_bytes;
   std::array<std::pair<std::string, float>, 16> uncommon_bytes;
   std::vector<size_t> replication_per_prog;
+  std::vector<size_t> steps_per_prog;
 };
 
 struct LanguageInterface {
