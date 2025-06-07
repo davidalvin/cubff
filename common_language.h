@@ -159,7 +159,8 @@ __global__ void MutateAndRunPrograms(uint8_t *programs,
                                      const uint32_t *shuf_idx, size_t seed,
                                      uint32_t mutation_prob,
                                      unsigned long long *insn_count,
-                                     size_t num_programs, size_t num_indices) {
+                                     size_t *steps_out, size_t num_programs,
+                                     size_t num_indices) {
   size_t index = GetIndex();
   uint8_t tape[2 * kSingleTapeSize] = {};
   if (2 * index >= num_programs) return;
@@ -189,6 +190,8 @@ __global__ void MutateAndRunPrograms(uint8_t *programs,
     programs[p1 * kSingleTapeSize + i] = tape[i];
     programs[p2 * kSingleTapeSize + i] = tape[i + kSingleTapeSize];
   }
+  steps_out[p1] = ops;
+  steps_out[p2] = ops;
   IncreaseInsnCount(ops, insn_count);
 }
 
@@ -361,6 +364,7 @@ void Simulation<Language>::RunSimulation(
 
   DeviceMemory<uint8_t> programs(kSingleTapeSize * num_programs);
   DeviceMemory<unsigned long long> insn_count(1);
+  DeviceMemory<size_t> program_steps(num_programs);
 
   CHECK(num_programs % 2 == 0);
 
@@ -386,6 +390,7 @@ void Simulation<Language>::RunSimulation(
   state.soup.reserve(num_programs * kSingleTapeSize + 16);
   state.soup.resize(num_programs * kSingleTapeSize);
   state.replication_per_prog.resize(num_programs);
+  state.steps_per_prog.resize(num_programs);
   state.shuffle_idx.resize(num_programs);
   Language::InitByteColors(state.byte_colors);
 
@@ -489,8 +494,8 @@ void Simulation<Language>::RunSimulation(
 
     RUN((num_programs + 2 * kNumThreads - 1) / (2 * kNumThreads), kNumThreads,
         MutateAndRunPrograms<Language>, programs.Get(), shuf_idx.Get(),
-        seed(epoch), params.mutation_prob, insn_count.Get(), num_programs,
-        num_indices);
+        seed(epoch), params.mutation_prob, insn_count.Get(),
+        program_steps.Get(), num_programs, num_indices);
     num_runs += num_indices;
 
     if (epoch % params.callback_interval == 0) {
@@ -499,6 +504,7 @@ void Simulation<Language>::RunSimulation(
       unsigned long long insn;
       insn_count.Read(&insn, 1);
       total_ops += insn;
+      program_steps.Read(state.steps_per_prog.data(), num_programs);
       programs.Read(state.soup.data(), num_programs * kSingleTapeSize);
       Synchronize();
       size_t brotli_size = brotlified_data.size();
