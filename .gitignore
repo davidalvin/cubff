@@ -1,12 +1,43 @@
-bin
-*.swp
+cat <<EOF > .gitignore
+# Compiled binaries and build outputs
+bin/
 build/
-experimentlogs/*
+*.o
+*.so
+*.a
+
+# Swap and temp files
+*.swp
+
+# Experiment outputs
+experimentlogs/
 *.csv
 *.dat
 *.gif
 *.png
 
-# Caches and pyc files
+# Python bytecode and caches
 **/__pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Python virtual environment and version control
+.venv/
+env/
+.python-version
+
+# Pyenv specific files
+pyenv*
+.venv/
+
+# VSCode or other editor settings
+.vscode/
+.idea/
+
+# OS system files
+.DS_Store
+
+# Logs
+*.log
+EOF

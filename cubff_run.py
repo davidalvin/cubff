@@ -21,7 +21,7 @@ NUM_PROGRAMS_TO_PRINT = 10       # Show a few programs in the console each epoch
 NUM_PROGRAMS_TO_SAVE = 10        # Save a few programs to CSV each epoch
 
 # Create output directory for saved data
-RUN_NAME = "20250531-4096E-128xSoup"
+RUN_NAME = "throwaway_run"
 SAVE_PATH = f"./runs/{RUN_NAME}"
 os.makedirs(SAVE_PATH, exist_ok=True)
 
