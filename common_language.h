@@ -391,6 +391,8 @@ void Simulation<Language>::RunSimulation(
   state.soup.resize(num_programs * kSingleTapeSize);
   state.replication_per_prog.resize(num_programs);
   state.steps_per_prog.resize(num_programs);
+  state.total_steps_per_prog.assign(num_programs, 0);
+  state.steps_epoch_count = 0;
   state.shuffle_idx.resize(num_programs);
   Language::InitByteColors(state.byte_colors);
 
@@ -505,6 +507,10 @@ void Simulation<Language>::RunSimulation(
       insn_count.Read(&insn, 1);
       total_ops += insn;
       program_steps.Read(state.steps_per_prog.data(), num_programs);
+      for (size_t i = 0; i < num_programs; ++i) {
+        state.total_steps_per_prog[i] += state.steps_per_prog[i];
+      }
+      state.steps_epoch_count++;
       programs.Read(state.soup.data(), num_programs * kSingleTapeSize);
       Synchronize();
       size_t brotli_size = brotlified_data.size();

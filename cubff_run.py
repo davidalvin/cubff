@@ -2,6 +2,7 @@ import os
 import random
 from bin import cubff  # Provides access to compiled C++ simulation code
 from bff_grammar_package.grammar_core.io import save_partial_soup_csv_raw, save_run_metadata
+from histogram_tracker import HistogramTracker
 
 
 # === PARAMETERS ===
@@ -15,7 +16,7 @@ EVAL_SELFREP = False             # If True, run self-replication detection
 PERMUTE_PROGRAMS = True          # Randomly shuffle pairings each epoch
 FIXED_SHUFFLE = False            # Use deterministic shuffling scheme
 SAVE_INTERVAL = 32                # Save full soup snapshot every N epochs
-CALLBACK_INTERVAL = 32            # How often the callback runs
+CALLBACK_INTERVAL = 1            # How often the callback runs
 MAX_EPOCHS = 4096                   # Stop after this many epochs; 4096 is good default
 NUM_PROGRAMS_TO_PRINT = 10       # Show a few programs in the console each epoch
 NUM_PROGRAMS_TO_SAVE = 10        # Save a few programs to CSV each epoch
@@ -28,10 +29,27 @@ os.makedirs(SAVE_PATH, exist_ok=True)
 # Load the BFF language interface (variant without explicit head encodings)
 language = cubff.GetLanguage("bff_noheads")
 
+# Initialize the histogram tracker to visualize step distributions
+hist_tracker = HistogramTracker(SAVE_PATH)
+
 def callback(state):
     """Called at the end of every `callback_interval` epochs."""
 
     print(state.epoch, state.brotli_size)  # Print epoch number and compressed size for debugging
+
+    if state.steps_epoch_count:
+        mean_steps = sum(state.total_steps_per_prog) / (
+            len(state.total_steps_per_prog) * state.steps_epoch_count
+        )
+        max_steps = max(state.steps_per_prog)
+        min_steps = min(state.steps_per_prog)
+        print(f"Mean steps per program over epochs: {mean_steps:.2f}")
+        print(f"Current epoch steps range: {min_steps} - {max_steps}")
+        from collections import Counter
+
+        dist = Counter(state.steps_per_prog)
+        most_common = list(dist.items())[:5]
+        print("Sample distribution (step_count: occurrences):", most_common)
 
     # Pick random programs to display
     num_programs = len(state.soup) // PROGRAM_SIZE
@@ -46,11 +64,14 @@ def callback(state):
         language.PrintProgram(0, program, SPLIT_AT)  # Show nicely-formatted tape contents
 
     # Save a few programs as raw characters (for inspecting motifs)
-    save_partial_soup_csv_raw(
-        state, SAVE_PATH, state.epoch,
-        replace_noops=True, as_characters=True,
-        program_size=PROGRAM_SIZE, num_to_save=NUM_PROGRAMS_TO_SAVE
-    )
+    # save_partial_soup_csv_raw(
+    #     state, SAVE_PATH, state.epoch,
+    #     replace_noops=True, as_characters=True,
+    #     program_size=PROGRAM_SIZE, num_to_save=NUM_PROGRAMS_TO_SAVE
+    # )
+
+    # Add a histogram frame for the current epoch
+    hist_tracker.add_frame(state.steps_per_prog, state.epoch)
 
     # Stop simulation when reaching the epoch limit
     if state.epoch >= MAX_EPOCHS:
@@ -68,6 +89,10 @@ def callback(state):
             "CALLBACK_INTERVAL": CALLBACK_INTERVAL,
             "MAX_EPOCHS": MAX_EPOCHS
         })
+
+        # Save the histogram as an animated GIF
+        hist_tracker.save_gif()
+
         return True  # signal termination
 
     return False  # keep running

@@ -89,6 +89,8 @@ struct SimulationState {
   std::array<std::pair<std::string, float>, 16> uncommon_bytes;
   std::vector<size_t> replication_per_prog;
   std::vector<size_t> steps_per_prog;
+  std::vector<unsigned long long> total_steps_per_prog;
+  size_t steps_epoch_count;
 };
 
 struct LanguageInterface {

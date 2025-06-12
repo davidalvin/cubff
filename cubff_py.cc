@@ -71,7 +71,10 @@ PYBIND11_MODULE(cubff, m) {
       .def_readonly("uncommon_bytes", &SimulationState::uncommon_bytes)
       .def_readonly("replication_per_prog",
                     &SimulationState::replication_per_prog)
-      .def_readonly("steps_per_prog", &SimulationState::steps_per_prog);
+      .def_readonly("steps_per_prog", &SimulationState::steps_per_prog)
+      .def_readonly("total_steps_per_prog",
+                    &SimulationState::total_steps_per_prog)
+      .def_readonly("steps_epoch_count", &SimulationState::steps_epoch_count);
 
   pybind11::class_<LanguageInterface>(m, "LanguageInterface")
       .def("PrintProgram",
