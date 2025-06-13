@@ -15,6 +15,10 @@ experimentlogs/
 *.dat
 *.gif
 *.png
+*.json
+
+# Text files
+*.txt
 
 # Python bytecode and caches
 **/__pycache__/
