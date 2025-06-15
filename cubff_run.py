@@ -10,7 +10,7 @@ from histogram_tracker import HistogramTracker
 from trace_utils import trace_program_pair
 
 # === PARAMETERS ===
-NUM_PROGRAMS = 128 * 1024
+NUM_PROGRAMS = 128*1024
 PROGRAM_SIZE = 128
 SPLIT_AT = [64]
 SEED = 0
@@ -58,6 +58,7 @@ def callback(state):
         ew = csv.writer(ef)
         ew.writerow(["source", "target"])
         shuffle = state.shuffle_idx
+       # print(f"🔀 Epoch {state.epoch} Shuffle Index: {shuffle}")  # 👈 Add this line
         for i in range(0, len(shuffle), 2):
             p1 = shuffle[i]
             p2 = shuffle[i + 1] if i + 1 < len(shuffle) else None

@@ -591,6 +591,9 @@ void Simulation<Language>::RunSimulation(
         fwrite(state.soup.data(), 1, state.soup.size(), f);
         fclose(f);
       }
+      // Expose current shuffling order to the callback for debugging.
+      state.shuffle_idx = s;
+      
       if (callback(state)) {
         break;
       }

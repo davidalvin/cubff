@@ -1,9 +1,7 @@
 import os
-import struct
 import csv
 import argparse
-from collections import defaultdict
-from bin import cubff  # Assuming cubff is your compiled interface
+from bin import cubff  # Compiled C++ simulation bindings
 
 TAPE_SIZE = 64
 
@@ -20,8 +18,8 @@ def trace_evolution(tape_idx, run_path, language, start_epoch=2, max_epochs=10):
         print(f"\n🔄 Epoch {epoch} — Tracing TAPE {current_tape}")
 
         edges_path = os.path.join(run_path, f"edges_{epoch:04d}.csv")
-        soup_prev_path = os.path.join(run_path, f"{epoch - 1:010d}.dat")
-        soup_curr_path = os.path.join(run_path, f"{epoch:010d}.dat")
+        soup_prev_path = os.path.join(run_path, f"{epoch - 2:010d}.dat")  # Parents
+        soup_curr_path = os.path.join(run_path, f"{epoch - 1:010d}.dat")  # Children
 
         if not all(os.path.exists(p) for p in [edges_path, soup_prev_path, soup_curr_path]):
             print(f"[!] Missing data at epoch {epoch}. Stopping trace.")
@@ -37,36 +35,41 @@ def trace_evolution(tape_idx, run_path, language, start_epoch=2, max_epochs=10):
         found = False
         for i in range(0, len(rows), 4):
             group = rows[i:i + 4]
-            sources = sorted({int(r["source"]) for r in group})
-            targets = sorted({int(r["target"]) for r in group})
 
-            if current_tape in sources:
-                t1, t2 = sources
-                c1, c2 = targets
+            if len(group) < 4:
+                continue  # Malformed
 
-                found = True
-                print(f"\n🧬 Parents (Epoch {epoch - 1}) — TAPES {t1}, {t2}")
-                parent_bytes = (
-                    soup_prev[t1 * TAPE_SIZE : (t1 + 1) * TAPE_SIZE] +
-                    soup_prev[t2 * TAPE_SIZE : (t2 + 1) * TAPE_SIZE]
-                )
-                language.PrintProgram(0, cubff.VectorUint8(parent_bytes), [TAPE_SIZE])
+            # Preserve ordering from callback (not sorted!)
+            p1 = int(group[0]["source"])
+            p2 = int(group[1]["source"])
+            c1 = int(group[0]["target"])
+            c2 = int(group[2]["target"])
 
-                print(f"👶 Children (Epoch {epoch}) — TAPES {c1}, {c2}")
-                child_bytes = (
-                    soup_curr[c1 * TAPE_SIZE : (c1 + 1) * TAPE_SIZE] +
-                    soup_curr[c2 * TAPE_SIZE : (c2 + 1) * TAPE_SIZE]
-                )
-                language.PrintProgram(0, cubff.VectorUint8(child_bytes), [TAPE_SIZE])
+            if current_tape not in (c1, c2):
+                continue
 
-                # 🧭 Choose which child to follow: keep same index if possible
-                current_tape = c1 if current_tape == t1 else c2
-                break
+            print(f"\n🧬 Parents (Epoch {epoch - 1}) — TAPES {p1}, {p2}")
+            parent_bytes = (
+                soup_prev[p1 * TAPE_SIZE : (p1 + 1) * TAPE_SIZE] +
+                soup_prev[p2 * TAPE_SIZE : (p2 + 1) * TAPE_SIZE]
+            )
+            language.PrintProgram(0, cubff.VectorUint8(parent_bytes), [TAPE_SIZE])
+
+            print(f"👶 Children (Epoch {epoch}) — TAPES {c1}, {c2}")
+            child_bytes = (
+                soup_curr[c1 * TAPE_SIZE : (c1 + 1) * TAPE_SIZE] +
+                soup_curr[c2 * TAPE_SIZE : (c2 + 1) * TAPE_SIZE]
+            )
+            language.PrintProgram(0, cubff.VectorUint8(child_bytes), [TAPE_SIZE])
+
+            # Follow the tape in same slot as before, if still present
+            current_tape = c1 if current_tape == c1 else c2
+            found = True
+            break
 
         if not found:
             print(f"[!] TAPE {current_tape} not found in any edge group at epoch {epoch}")
             break
-
 
 def main():
     parser = argparse.ArgumentParser(description="Trace the evolution of a TAPE over epochs.")
