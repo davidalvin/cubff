@@ -4,6 +4,7 @@ fonttools==4.58.2
 imageio==2.37.0
 kiwisolver==1.4.8
 matplotlib==3.10.3
+networkx==3.5
 numpy==2.3.0
 packaging==25.0
 pandas==2.3.0
