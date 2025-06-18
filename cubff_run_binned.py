@@ -2,15 +2,12 @@ import os
 import random
 import csv
 from bin import cubff  # Compiled C++ simulation bindings
-from bff_grammar_package.grammar_core.io import (
-    save_partial_soup_csv_raw,
-    save_run_metadata,
-)
+from bff_grammar_package.grammar_core.io import save_run_metadata
 from histogram_tracker import HistogramTracker
-from trace_utils import trace_program_pair
 
 # === PARAMETERS ===
 NUM_PROGRAMS = 128 * 1024
+TAPE_SIZE = 64
 PROGRAM_SIZE = 128
 SPLIT_AT = [64]
 SEED = 0
@@ -21,21 +18,18 @@ PERMUTE_PROGRAMS = True
 FIXED_SHUFFLE = False
 SAVE_INTERVAL = 1
 CALLBACK_INTERVAL = 1
-MAX_EPOCHS = 256
-NUM_PROGRAMS_TO_PRINT = 10
-NUM_PROGRAMS_TO_SAVE = 0
-PRINT_EVERY = 16
-BIN_WIDTH = 25  # 👈 Bin width for execution time clustering
+MAX_EPOCHS = 128
+NUM_QC_PROGRAMS = 5
+BIN_WIDTH = 25
 
+# === Output paths ===
 RUN_NAME = "bin_run"
-
-# === Output directory setup ===
 SAVE_PATH = f"./runs/{RUN_NAME}"
 os.makedirs(SAVE_PATH, exist_ok=True)
 DEBUG_LOG_DIR = os.path.join(SAVE_PATH, "debug_epoch_logs")
 os.makedirs(DEBUG_LOG_DIR, exist_ok=True)
 
-# === Load language + histogram tracker ===
+# === Language and Histogram Setup ===
 language = cubff.GetLanguage("bff_noheads")
 hist_tracker = HistogramTracker(
     save_path=SAVE_PATH,
@@ -46,83 +40,122 @@ hist_tracker = HistogramTracker(
     flush_interval=16
 )
 
-# === Callback executed every epoch ===
-def callback(state):
-    edges_path = os.path.join(SAVE_PATH, f"edges_{state.epoch:04d}.csv")
-    nodes_path = os.path.join(SAVE_PATH, f"nodes_{state.epoch:04d}.csv")
+# === Cross-epoch tracking ===
+previous_soup = None
+tracked_p1_indices = None  # Fixed across epochs
 
-    with open(edges_path, "w", newline="") as ef:
+def callback(state):
+    global previous_soup, tracked_p1_indices
+
+    # Bin current execution steps
+    current_bins = [steps // BIN_WIDTH for steps in state.steps_per_prog]
+
+    # Load previous steps if possible
+    prev_steps_list = []
+    prev_bins = None
+    prev_steps_path = os.path.join(SAVE_PATH, f"steps_{state.epoch - 1:04d}.csv")
+    if state.epoch > 0 and os.path.exists(prev_steps_path):
+        with open(prev_steps_path) as pf:
+            reader = csv.DictReader(pf)
+            prev_steps_list = [int(row["exec_steps"]) for row in reader]
+            prev_bins = [steps // BIN_WIDTH for steps in prev_steps_list]
+
+    # === Bin edges ===
+    bin_edge_counts = {}
+    if prev_bins:
+        for i in range(0, len(state.shuffle_idx), 2):
+            p1 = state.shuffle_idx[i]
+            p2 = state.shuffle_idx[i + 1] if i + 1 < len(state.shuffle_idx) else None
+            parents = [p1, p2] if p2 is not None else [p1]
+            children = [p1, p2] if p2 is not None else [p1]
+            for parent, child in zip(parents, children):
+                src_bin = prev_bins[parent]
+                tgt_bin = current_bins[child]
+                key = (src_bin, tgt_bin)
+                bin_edge_counts[key] = bin_edge_counts.get(key, 0) + 1
+
+    with open(os.path.join(SAVE_PATH, f"bin_edges_{state.epoch:04d}.csv"), "w", newline="") as bf:
+        bw = csv.writer(bf)
+        bw.writerow(["epoch", "source_bin", "target_bin", "count"])
+        for (src_bin, tgt_bin), count in sorted(bin_edge_counts.items()):
+            bw.writerow([state.epoch, src_bin, tgt_bin, count])
+
+    # === Node metadata ===
+    with open(os.path.join(SAVE_PATH, f"nodes_{state.epoch:04d}.csv"), "w", newline="") as nf:
+        nw = csv.writer(nf)
+        nw.writerow(["id", "epoch", "exec_time", "bin"])
+        for idx, steps in enumerate(state.steps_per_prog):
+            nw.writerow([idx, state.epoch, steps, current_bins[idx]])
+
+    # === Raw program edges ===
+    with open(os.path.join(SAVE_PATH, f"edges_{state.epoch:04d}.csv"), "w", newline="") as ef:
         ew = csv.writer(ef)
         ew.writerow(["source", "target"])
-        shuffle = state.shuffle_idx
-        for i in range(0, len(shuffle), 2):
-            p1 = shuffle[i]
-            p2 = shuffle[i + 1] if i + 1 < len(shuffle) else None
+        for i in range(0, len(state.shuffle_idx), 2):
+            p1 = state.shuffle_idx[i]
+            p2 = state.shuffle_idx[i + 1] if i + 1 < len(state.shuffle_idx) else None
             ew.writerow([p1, p1])
             if p2 is not None:
                 ew.writerow([p2, p1])
                 ew.writerow([p1, p2])
                 ew.writerow([p2, p2])
 
-    # Compute execution bins
-    program_bins = [steps // BIN_WIDTH for steps in state.steps_per_prog]
+    # === QC lineage check ===
+    if state.epoch > 0 and previous_soup is not None:
+        shuffle_list = list(state.shuffle_idx)
 
-    # Write bin_edges
-    bin_edges_path = os.path.join(SAVE_PATH, f"bin_edges_{state.epoch:04d}.csv")
-    with open(bin_edges_path, "w", newline="") as bf:
-        bw = csv.writer(bf)
-        bw.writerow(["epoch", "source_bin", "target_bin", "count"])
-        bin_edge_counts = {}
+        if tracked_p1_indices is None:
+            tracked_p1_indices = random.sample(shuffle_list, NUM_QC_PROGRAMS)
 
-        for i in range(0, len(state.shuffle_idx), 2):
-            p1 = state.shuffle_idx[i]
-            p2 = state.shuffle_idx[i + 1] if i + 1 < len(state.shuffle_idx) else None
-            c1 = p1
-            c2 = p2 if p2 is not None else p1
+        print(f"\n🧪 QC: Epoch {state.epoch} — Tracking {len(tracked_p1_indices)} fixed P1s")
+        for i, p1_idx in enumerate(tracked_p1_indices):
+            try:
+                pair_idx = shuffle_list.index(p1_idx)
+                p2_idx = shuffle_list[pair_idx + 1] if pair_idx + 1 < len(shuffle_list) else None
+            except ValueError:
+                print(f"P1 index {p1_idx} not found in shuffle list")
+                continue
 
-            parents = [p1, p2] if p2 is not None else [p1]
-            children = [c1, c2]
+            # Step counts
+            steps_p1 = prev_steps_list[p1_idx]
+            steps_p2 = prev_steps_list[p2_idx] if p2_idx is not None else None
+            steps_c1 = state.steps_per_prog[p1_idx]
+            steps_c2 = state.steps_per_prog[p2_idx] if p2_idx is not None else None
 
-            for parent, child in zip(parents, children):
-                src_bin = program_bins[parent]
-                tgt_bin = program_bins[child]
-                key = (src_bin, tgt_bin)
-                bin_edge_counts[key] = bin_edge_counts.get(key, 0) + 1
+            # Tapes
+            parent1 = cubff.VectorUint8(previous_soup[p1_idx * TAPE_SIZE:(p1_idx + 1) * TAPE_SIZE])
+            child1 = cubff.VectorUint8(state.soup[p1_idx * TAPE_SIZE:(p1_idx + 1) * TAPE_SIZE])
+            parent2 = cubff.VectorUint8(previous_soup[p2_idx * TAPE_SIZE:(p2_idx + 1) * TAPE_SIZE]) if p2_idx is not None else None
+            child2 = cubff.VectorUint8(state.soup[p2_idx * TAPE_SIZE:(p2_idx + 1) * TAPE_SIZE]) if p2_idx is not None else None
 
-        for (src_bin, tgt_bin), count in bin_edge_counts.items():
-            bw.writerow([state.epoch, src_bin, tgt_bin, count])
+            # Print info
+            print(f"\n--- Pair {i} ---")
+            print(f"P1 @ {p1_idx} | Steps: {steps_p1}")
+            language.PrintProgram(0, parent1, SPLIT_AT)
+            if parent2:
+                print(f"P2 @ {p2_idx} | Steps: {steps_p2}")
+                language.PrintProgram(0, parent2, SPLIT_AT)
 
-    # Write node metadata with bins
-    with open(nodes_path, "w", newline="") as nf:
-        nw = csv.writer(nf)
-        nw.writerow(["id", "epoch", "exec_time", "bin"])
+            print(f"C1 @ {p1_idx} | Steps: {steps_c1}")
+            language.PrintProgram(0, child1, SPLIT_AT)
+            print("✅ P1 == C1" if parent1 == child1 else "🔁 P1 ≠ C1")
+
+            if child2:
+                print(f"C2 @ {p2_idx} | Steps: {steps_c2}")
+                language.PrintProgram(0, child2, SPLIT_AT)
+                print("✅ P2 == C2" if parent2 == child2 else "🔁 P2 ≠ C2")
+
+    # === Save exec steps ===
+    with open(os.path.join(SAVE_PATH, f"steps_{state.epoch:04d}.csv"), "w", newline="") as sf:
+        sw = csv.writer(sf)
+        sw.writerow(["program_idx", "exec_steps"])
         for idx, steps in enumerate(state.steps_per_prog):
-            b = steps // BIN_WIDTH
-            nw.writerow([idx, state.epoch, steps, b])
+            sw.writerow([idx, steps])
 
-    # Print info every N epochs
-    if state.epoch % PRINT_EVERY == 0 or state.epoch == MAX_EPOCHS:
-        print(f"\n📦 Epoch {state.epoch} | Brotli size: {state.brotli_size}")
+    # === Cache soup for next epoch ===
+    previous_soup = list(state.soup)
 
-        if state.steps_epoch_count:
-            mean_steps = sum(state.total_steps_per_prog) / (
-                len(state.total_steps_per_prog) * state.steps_epoch_count
-            )
-            max_steps = max(state.steps_per_prog)
-            min_steps = min(state.steps_per_prog)
-            print(f"📊 Mean steps: {mean_steps:.2f}, Range: {min_steps}–{max_steps}")
-
-        num_programs = len(state.soup) // PROGRAM_SIZE
-        if num_programs > 0:
-            indices = random.sample(range(num_programs), min(NUM_PROGRAMS_TO_PRINT, num_programs))
-            for i, idx in enumerate(indices):
-                start = idx * PROGRAM_SIZE
-                end = start + PROGRAM_SIZE
-                program = state.soup[start:end]
-                print(f"\n🧬 Program {i} (index {idx}):")
-                language.PrintProgram(0, program, SPLIT_AT)
-
-    # Finalize after last epoch
+    # === Stop condition ===
     if state.epoch >= MAX_EPOCHS:
         save_run_metadata(SAVE_PATH, state, {
             "NUM_PROGRAMS": NUM_PROGRAMS,
@@ -137,14 +170,13 @@ def callback(state):
             "SAVE_INTERVAL": SAVE_INTERVAL,
             "CALLBACK_INTERVAL": CALLBACK_INTERVAL,
             "MAX_EPOCHS": MAX_EPOCHS,
-            "PRINT_EVERY": PRINT_EVERY,
             "BIN_WIDTH": BIN_WIDTH
         })
         return True
 
     return False
 
-# === Simulation setup and execution ===
+# === Start Simulation ===
 params = cubff.SimulationParams()
 params.num_programs = NUM_PROGRAMS
 params.seed = SEED
@@ -159,3 +191,16 @@ params.save_interval = SAVE_INTERVAL
 
 cubff.ResetColors()
 language.RunSimulation(params, None, callback)
+
+from db_qc import (
+    check_node_vs_dat_size,
+    check_tape_matches,
+    check_children_steps_match,
+    trace_tape_lineage
+)
+
+SAVE_PATH = "./runs/db_run"
+check_node_vs_dat_size(epoch=10, save_path=SAVE_PATH)
+check_tape_matches(epoch=10, save_path=SAVE_PATH)
+check_children_steps_match(epoch=10, save_path=SAVE_PATH)
+trace_tape_lineage(start_epoch=1, start_idx=42, save_path=SAVE_PATH)
