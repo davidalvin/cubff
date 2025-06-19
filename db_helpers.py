@@ -3,6 +3,43 @@ import csv
 import base64
 
 
+# === Command Mapping from BFF Grammar ===
+COMMAND_REPR = list("[]+-.,<>{}")
+COMMAND_KIND_LOOKUP = {ord(c): i for i, c in enumerate(COMMAND_REPR)}
+
+def get_op_kind(byte):
+    if byte == 0:
+        return "kNull"
+    elif byte in COMMAND_KIND_LOOKUP:
+        return "kCommand"
+    else:
+        return "kNoop"
+
+def character_repr(byte):
+    # Match some overrides in the C++ table
+    overrides = {
+        0xC0: 'A', 0xC1: 'B', 0xC2: 'C', 0xC3: 'D', 0xC4: 'E', 0xC5: 'F',
+        0xC6: 'G', 0xC7: 'H', 0xC8: 'I', 0xF0: 'J', 0xF1: 'K', 0xF2: 'L',
+    }
+    return overrides.get(byte, chr(0x0100 + byte))  # default Unicode string
+
+def map_char(byte):
+    kind = get_op_kind(byte)
+    if kind == "kCommand":
+        return COMMAND_REPR[COMMAND_KIND_LOOKUP[byte]]
+    elif kind == "kNull":
+        return "0"
+    else:
+        return character_repr(byte)
+
+# === Precomputed 256-entry byte-to-string map
+CHAR_MAP = [map_char(b) for b in range(256)]
+
+def pretty_print_tape(tape: bytes, split_at: int = 64) -> str:
+    """Human-readable visual tape display."""
+    return "[" + ''.join(CHAR_MAP[b] for b in tape[:split_at]) + \
+           "|" + ''.join(CHAR_MAP[b] for b in tape[split_at:]) + "]"
+
 def write_epoch_table(save_path: str, max_epoch: int):
     """Create a CSV mapping epoch numbers to their .dat soup files."""
     out_path = os.path.join(save_path, "epochs.csv")
@@ -14,7 +51,14 @@ def write_epoch_table(save_path: str, max_epoch: int):
             writer.writerow([epoch, dat_file])
 
 
-def write_node_table(epoch: int, soup: bytes, exec_steps: list[int], save_path: str, tape_size: int = 64):
+def write_node_table(
+    epoch: int,
+    soup: bytes,
+    exec_steps: list[int],
+    save_path: str,
+    tape_size: int = 64,
+    save_format: str = "both"  # "hex", "pretty", or "both"
+):
     """Save one row per tape (program half) in the soup, for a given epoch."""
     out_path = os.path.join(save_path, f"nodes_epoch_{epoch:04d}.csv")
     num_tapes = len(soup) // tape_size
@@ -25,11 +69,30 @@ def write_node_table(epoch: int, soup: bytes, exec_steps: list[int], save_path: 
 
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "tape_idx", "tape_hex", "exec_steps"])
+
+        # Decide columns
+        fields = ["epoch", "tape_idx", "exec_steps"]
+        if save_format in ("hex", "both"):
+            fields.insert(2, "tape_hex")
+        if save_format in ("pretty", "both"):
+            fields.insert(2, "tape_pretty")
+
+        writer.writerow(fields)
+
         for i in range(num_tapes):
             tape = soup[i * tape_size : (i + 1) * tape_size]
-            tape_hex = tape.hex()  # 128-character hex string for 64 bytes
-            writer.writerow([epoch, i, tape_hex, exec_steps[i]])
+            row = [epoch, i, exec_steps[i]]
+
+            # Insert pretty/hex in order
+            if save_format == "both":
+                row.insert(2, pretty_print_tape(tape))
+                row.insert(2, tape.hex())
+            elif save_format == "pretty":
+                row.insert(2, pretty_print_tape(tape))
+            elif save_format == "hex":
+                row.insert(2, tape.hex())
+
+            writer.writerow(row)
 
 
 
@@ -49,3 +112,73 @@ def append_edges(epoch: int, shuffle_idx: list[int], save_path: str):
         for i in range(0, len(shuffle_idx), 2):
             p1, p2 = shuffle_idx[i], shuffle_idx[i + 1]
             writer.writerow([epoch - 1, p1, p2, epoch, p1, p2])
+
+def write_step_edges(save_path: str):
+    """
+    Creates edges_steps.csv from edges.csv by replacing all tape indices
+    (p1_idx, p2_idx, c1_idx, c2_idx) with their exec_steps.
+    """
+    edges_path = os.path.join(save_path, "edges.csv")
+    out_path = os.path.join(save_path, "edges_steps.csv")
+
+    # Load all nodes into a dict by (epoch, tape_idx) → steps
+    step_lookup = {}
+    for fname in os.listdir(save_path):
+        if fname.startswith("nodes_epoch_") and fname.endswith(".csv"):
+            epoch = int(fname[len("nodes_epoch_"):-4])
+            with open(os.path.join(save_path, fname), newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    key = (epoch, int(row["tape_idx"]))
+                    step_lookup[key] = int(row["exec_steps"])
+
+    with open(edges_path, newline="") as f_in, open(out_path, "w", newline="") as f_out:
+        reader = csv.DictReader(f_in)
+        writer = csv.writer(f_out)
+        writer.writerow(["parent_epoch", "p1_steps", "p2_steps", "child_epoch", "c1_steps", "c2_steps"])
+
+        for row in reader:
+            pe = int(row["parent_epoch"])
+            ce = int(row["child_epoch"])
+            p1 = int(row["p1_idx"])
+            p2 = int(row["p2_idx"])
+            c1 = int(row["c1_idx"])
+            c2 = int(row["c2_idx"])
+            writer.writerow([
+                pe,
+                step_lookup.get((pe, p1), -1),
+                step_lookup.get((pe, p2), -1),
+                ce,
+                step_lookup.get((ce, c1), -1),
+                step_lookup.get((ce, c2), -1),
+            ])
+
+def write_binned_step_edges(save_path: str, bin_size: int = 25):
+    """
+    Creates edges_steps_binned.csv by replacing exec_steps with bin indices.
+    For example, bin_size=25 means 0–24 → bin 0, 25–49 → bin 1, etc.
+    """
+    in_path = os.path.join(save_path, "edges_steps.csv")
+    out_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
+
+    with open(in_path, newline="") as f_in, open(out_path, "w", newline="") as f_out:
+        reader = csv.DictReader(f_in)
+        writer = csv.writer(f_out)
+        writer.writerow(["parent_epoch", "p1_bin", "p2_bin", "child_epoch", "c1_bin", "c2_bin"])
+
+        for row in reader:
+            def bin_val(val_str):
+                try:
+                    val = int(val_str)
+                    return val // bin_size
+                except:
+                    return -1  # fallback bin for missing or bad data
+
+            writer.writerow([
+                int(row["parent_epoch"]),
+                bin_val(row["p1_steps"]),
+                bin_val(row["p2_steps"]),
+                int(row["child_epoch"]),
+                bin_val(row["c1_steps"]),
+                bin_val(row["c2_steps"]),
+            ])

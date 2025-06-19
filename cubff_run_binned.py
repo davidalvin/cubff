@@ -192,15 +192,3 @@ params.save_interval = SAVE_INTERVAL
 cubff.ResetColors()
 language.RunSimulation(params, None, callback)
 
-from db_qc import (
-    check_node_vs_dat_size,
-    check_tape_matches,
-    check_children_steps_match,
-    trace_tape_lineage
-)
-
-SAVE_PATH = "./runs/db_run"
-check_node_vs_dat_size(epoch=10, save_path=SAVE_PATH)
-check_tape_matches(epoch=10, save_path=SAVE_PATH)
-check_children_steps_match(epoch=10, save_path=SAVE_PATH)
-trace_tape_lineage(start_epoch=1, start_idx=42, save_path=SAVE_PATH)

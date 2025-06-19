@@ -20,12 +20,17 @@ CALLBACK_INTERVAL = 1
 MAX_EPOCHS = 10
 BIN_WIDTH = 25
 
+# === NODE FORMAT OPTIONS ===
+# Options: "hex", "pretty", or "both"
+LARGE_RUN = False
+SAVE_FORMAT = "pretty" if LARGE_RUN else "both"
+
 # === OUTPUT SETUP ===
 RUN_NAME = "db_run"
 SAVE_PATH = f"./runs/{RUN_NAME}"
 os.makedirs(SAVE_PATH, exist_ok=True)
 
-# Optional: Initialize visual histogram tracker (still used?)
+# Optional: Initialize visual histogram tracker
 language = cubff.GetLanguage("bff_noheads")
 hist_tracker = HistogramTracker(
     save_path=SAVE_PATH,
@@ -38,16 +43,15 @@ hist_tracker = HistogramTracker(
 
 # === MAIN CALLBACK FUNCTION ===
 def callback(state):
-    # Write node info for current epoch
     write_node_table(
         epoch=state.epoch,
         soup=bytes(state.soup),
         exec_steps=state.steps_per_prog,
         save_path=SAVE_PATH,
-        tape_size=TAPE_SIZE
+        tape_size=TAPE_SIZE,
+        save_format=SAVE_FORMAT
     )
 
-    # Write parent-child edges based on shuffle_idx (from previous epoch)
     if state.epoch > 0:
         append_edges(
             epoch=state.epoch,
@@ -55,7 +59,6 @@ def callback(state):
             save_path=SAVE_PATH
         )
 
-    # Stop condition: write epoch table at final epoch
     if state.epoch >= MAX_EPOCHS:
         write_epoch_table(SAVE_PATH, MAX_EPOCHS)
         save_run_metadata(SAVE_PATH, state, {
@@ -94,18 +97,27 @@ params.save_to = SAVE_PATH
 cubff.ResetColors()
 language.RunSimulation(params, None, callback)
 
+# === POST-RUN QUALITY CHECKS ===
 from db_qc import (
     check_node_vs_dat_size,
     check_tape_matches,
     check_children_steps_match,
-    trace_tape_interactive, 
-    inspect_tape
+    trace_tape_interactive,
+    inspect_tape,
+    validate_step_trace_interactive
 )
 
-SAVE_PATH = "./runs/db_run"
+SAVE_PATH = f"./runs/{RUN_NAME}"
 check_node_vs_dat_size(epoch=10, save_path=SAVE_PATH)
-inspect_tape(epoch=10, tape_idx=0, save_path="./runs/db_run")
+inspect_tape(epoch=10, tape_idx=0, save_path=SAVE_PATH)
 check_tape_matches(epoch=10, save_path=SAVE_PATH)
 check_children_steps_match(epoch=10, save_path=SAVE_PATH)
-trace_tape_interactive(start_epoch=1, start_idx=4, save_path="./runs/db_run")
+trace_tape_interactive(start_epoch=1, start_idx=4, save_path=SAVE_PATH)
 
+from db_helpers import write_step_edges, write_binned_step_edges
+
+SAVE_PATH = "./runs/db_run"
+write_step_edges(SAVE_PATH)
+write_binned_step_edges(SAVE_PATH, bin_size=25)
+
+validate_step_trace_interactive(start_epoch=1, start_idx=4, save_path="./runs/db_run", bin_size=25)
