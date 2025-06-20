@@ -1,7 +1,7 @@
 import os
 import csv
 import base64
-
+from collections import Counter
 
 # === Command Mapping from BFF Grammar ===
 COMMAND_REPR = list("[]+-.,<>{}")
@@ -182,3 +182,69 @@ def write_binned_step_edges(save_path: str, bin_size: int = 25):
                 bin_val(row["c1_steps"]),
                 bin_val(row["c2_steps"]),
             ])
+
+def write_gephi_weighted_edges_from_binned_steps(save_path: str, bin_size: int):
+    """
+    Create a directed, weighted edge list from binned execution transitions.
+
+    Each parent bin (p1, p2) points to both child bins (c1, c2).
+    Duplicate edges are aggregated with a weight.
+
+    Output: edges_gephi_binned_<bin_size>.csv
+    Format: Source, Target, Weight
+    """
+    in_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
+    out_path = os.path.join(save_path, f"edges_gephi_binned_{bin_size}.csv")
+
+    edge_counter = Counter()
+
+    with open(in_path, newline="") as fin:
+        reader = csv.DictReader(fin)
+        for row in reader:
+            p1 = row["p1_bin"]
+            p2 = row["p2_bin"]
+            c1 = row["c1_bin"]
+            c2 = row["c2_bin"]
+
+            # Only count valid transitions (non -1)
+            for src in (p1, p2):
+                for tgt in (c1, c2):
+                    if src != "-1" and tgt != "-1":
+                        edge_counter[(int(src), int(tgt))] += 1
+
+    with open(out_path, "w", newline="") as fout:
+        writer = csv.writer(fout)
+        writer.writerow(["Source", "Target", "Weight"])
+        for (src, tgt), weight in sorted(edge_counter.items()):
+            writer.writerow([src, tgt, weight])
+
+
+
+def write_gephi_nodes_from_bins(save_path: str, bin_size: int):
+    """
+    Create Gephi-compatible node file using bin indices as IDs.
+    Each node is labeled with its step range, e.g., '0–24 steps'.
+
+    Args:
+        save_path: Path containing the binned edge file.
+        bin_size: Bin size used in binning (e.g., 25).
+    """
+    edge_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
+    out_path = os.path.join(save_path, f"gephi_nodes_binned_{bin_size}.csv")
+
+    bins = set()
+
+    with open(edge_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            for col in ["p1_bin", "p2_bin", "c1_bin", "c2_bin"]:
+                val = int(row[col])
+                if val >= 0:  # skip -1 invalid bins
+                    bins.add(val)
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "label"])
+        for b in sorted(bins):
+            label = f"{b * bin_size}–{(b + 1) * bin_size - 1} steps"
+            writer.writerow([b, label])

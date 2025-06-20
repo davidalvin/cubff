@@ -2,10 +2,26 @@ import os
 from bin import cubff  # Compiled C++ simulation bindings
 from bff_grammar_package.grammar_core.io import save_run_metadata
 from histogram_tracker import HistogramTracker
-from db_helpers import write_node_table, append_edges, write_epoch_table
+from db_helpers import (
+    write_node_table,
+    append_edges,
+    write_epoch_table,
+    write_step_edges,
+    write_binned_step_edges,
+    write_gephi_weighted_edges_from_binned_steps,
+    write_gephi_nodes_from_bins,
+)
+from db_qc import (
+    check_node_vs_dat_size,
+    inspect_tape,
+    check_tape_matches,
+    check_children_steps_match,
+    trace_tape_interactive,
+    validate_step_trace_interactive,
+)
 
 # === PARAMETERS ===
-NUM_PROGRAMS = 16
+NUM_PROGRAMS = 128*1024
 TAPE_SIZE = 64
 PROGRAM_SIZE = 128
 SPLIT_AT = [64]
@@ -17,11 +33,10 @@ PERMUTE_PROGRAMS = True
 FIXED_SHUFFLE = False
 SAVE_INTERVAL = 1
 CALLBACK_INTERVAL = 1
-MAX_EPOCHS = 10
+MAX_EPOCHS = 128
 BIN_WIDTH = 25
 
 # === NODE FORMAT OPTIONS ===
-# Options: "hex", "pretty", or "both"
 LARGE_RUN = False
 SAVE_FORMAT = "pretty" if LARGE_RUN else "both"
 
@@ -80,7 +95,7 @@ def callback(state):
 
     return False
 
-# === SIMULATION PARAM SETUP ===
+# === RUN SIMULATION ===
 params = cubff.SimulationParams()
 params.num_programs = NUM_PROGRAMS
 params.seed = SEED
@@ -93,31 +108,26 @@ params.callback_interval = CALLBACK_INTERVAL
 params.save_interval = SAVE_INTERVAL
 params.save_to = SAVE_PATH
 
-# === RUN SIMULATION ===
 cubff.ResetColors()
 language.RunSimulation(params, None, callback)
 
 # === POST-RUN QUALITY CHECKS ===
-from db_qc import (
-    check_node_vs_dat_size,
-    check_tape_matches,
-    check_children_steps_match,
-    trace_tape_interactive,
-    inspect_tape,
-    validate_step_trace_interactive
-)
+# check_node_vs_dat_size(epoch=10, save_path=SAVE_PATH)
+# inspect_tape(epoch=10, tape_idx=0, save_path=SAVE_PATH)
+# check_tape_matches(epoch=10, save_path=SAVE_PATH)
+# check_children_steps_match(epoch=10, save_path=SAVE_PATH)
+# trace_tape_interactive(start_epoch=1, start_idx=4, save_path=SAVE_PATH)
 
-SAVE_PATH = f"./runs/{RUN_NAME}"
-check_node_vs_dat_size(epoch=10, save_path=SAVE_PATH)
-inspect_tape(epoch=10, tape_idx=0, save_path=SAVE_PATH)
-check_tape_matches(epoch=10, save_path=SAVE_PATH)
-check_children_steps_match(epoch=10, save_path=SAVE_PATH)
-trace_tape_interactive(start_epoch=1, start_idx=4, save_path=SAVE_PATH)
-
-from db_helpers import write_step_edges, write_binned_step_edges
-
-SAVE_PATH = "./runs/db_run"
+# === DERIVED EDGE FORMATS ===
 write_step_edges(SAVE_PATH)
-write_binned_step_edges(SAVE_PATH, bin_size=25)
+write_binned_step_edges(SAVE_PATH, bin_size=BIN_WIDTH)
+write_gephi_weighted_edges_from_binned_steps(SAVE_PATH, bin_size=BIN_WIDTH)
+write_gephi_nodes_from_bins(SAVE_PATH, bin_size=BIN_WIDTH)
 
-validate_step_trace_interactive(start_epoch=1, start_idx=4, save_path="./runs/db_run", bin_size=25)
+# === QC BIN TRACE ===
+# validate_step_trace_interactive(
+#     start_epoch=1,
+#     start_idx=4,
+#     save_path=SAVE_PATH,
+#     bin_size=BIN_WIDTH
+# )
