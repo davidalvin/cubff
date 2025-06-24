@@ -2,6 +2,7 @@ import os
 import csv
 import base64
 from collections import Counter
+import matplotlib.pyplot as plt
 
 # === Command Mapping from BFF Grammar ===
 COMMAND_REPR = list("[]+-.,<>{}")
@@ -183,6 +184,82 @@ def write_binned_step_edges(save_path: str, bin_size: int = 25):
                 bin_val(row["c2_steps"]),
             ])
 
+def plot_epoch_lineage_graph(save_path: str, max_epoch: int, bin_size: int = 25):
+    """Plots execution steps (binned) across epochs with lineage lines between programs."""
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    import os
+    import csv
+    import time
+
+    print("📈 Starting epoch lineage plot generation...")
+    edges_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
+
+    if not os.path.exists(edges_path):
+        print(f"❌ Missing required file: {edges_path}")
+        return
+
+    print("🔍 Reading binned step transitions from edges...")
+    t0 = time.perf_counter()
+
+    bins_seen = set()
+    lines = []
+    edge_count = 0
+    skipped = 0
+
+    with open(edges_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                pe = int(row["parent_epoch"])
+                ce = int(row["child_epoch"])
+                pbins = [int(row["p1_bin"]), int(row["p2_bin"])]
+                cbins = [int(row["c1_bin"]), int(row["c2_bin"])]
+
+                for pb in pbins:
+                    for cb in cbins:
+                        if pb >= 0 and cb >= 0:
+                            lines.append([(pe, pb), (ce, cb)])
+                            bins_seen.update([pb, cb])
+                            edge_count += 1
+                        else:
+                            skipped += 1
+            except Exception as e:
+                print(f"⚠️  Skipping row due to error: {e}")
+                skipped += 1
+
+    print(f"✅ Loaded {edge_count} edges (skipped {skipped}) in {time.perf_counter() - t0:.2f}s")
+
+    print("🎨 Generating plot...")
+    t1 = time.perf_counter()
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(f"Step Bin ({bin_size} per bin)")
+    ax.set_title("Lineage of Programs by Execution Step Bins")
+
+    # Scatter endpoints for context
+    all_points = [pt for line in lines for pt in line]
+    ax.scatter(
+        [pt[0] for pt in all_points],
+        [pt[1] for pt in all_points],
+        s=1,
+        color="black",
+        alpha=0.1
+    )
+
+    lc = LineCollection(lines, colors="blue", linewidths=0.25, alpha=0.2)
+    ax.add_collection(lc)
+
+    ax.set_ylim(0, max(bins_seen) + 1)
+    ax.set_xlim(0, max_epoch + 1)
+
+    print(f"✅ Rendered in {time.perf_counter() - t1:.2f}s")
+
+    out_path = os.path.join(save_path, "epoch_lineage_plot.png")
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"📁 Lineage plot saved to: {out_path}")
+
 def write_gephi_weighted_edges_from_binned_steps(save_path: str, bin_size: int):
     """
     Create a directed, weighted edge list from binned execution transitions.
@@ -217,8 +294,6 @@ def write_gephi_weighted_edges_from_binned_steps(save_path: str, bin_size: int):
         writer.writerow(["Source", "Target", "Weight"])
         for (src, tgt), weight in sorted(edge_counter.items()):
             writer.writerow([src, tgt, weight])
-
-
 
 def write_gephi_nodes_from_bins(save_path: str, bin_size: int):
     """
