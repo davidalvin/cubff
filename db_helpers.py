@@ -58,7 +58,7 @@ def write_node_table(
     exec_steps: list[int],
     save_path: str,
     tape_size: int = 64,
-    save_format: str = "both"  # "hex", "pretty", or "both"
+    save_format: str = "both"  # "hex", "pretty", "both", or "none"
 ):
     """Save one row per tape (program half) in the soup, for a given epoch."""
     out_path = os.path.join(save_path, f"nodes_epoch_{epoch:04d}.csv")
@@ -71,12 +71,20 @@ def write_node_table(
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
 
-        # Decide columns
+        # Base columns
         fields = ["epoch", "tape_idx", "exec_steps"]
-        if save_format in ("hex", "both"):
+
+        if save_format == "hex":
             fields.insert(2, "tape_hex")
-        if save_format in ("pretty", "both"):
+        elif save_format == "pretty":
             fields.insert(2, "tape_pretty")
+        elif save_format == "both":
+            fields.insert(2, "tape_pretty")
+            fields.insert(2, "tape_hex")
+        elif save_format == "none":
+            pass
+        else:
+            raise ValueError(f"Unknown save_format: {save_format}")
 
         writer.writerow(fields)
 
@@ -84,14 +92,15 @@ def write_node_table(
             tape = soup[i * tape_size : (i + 1) * tape_size]
             row = [epoch, i, exec_steps[i]]
 
-            # Insert pretty/hex in order
-            if save_format == "both":
-                row.insert(2, pretty_print_tape(tape))
+            if save_format == "hex":
                 row.insert(2, tape.hex())
             elif save_format == "pretty":
                 row.insert(2, pretty_print_tape(tape))
-            elif save_format == "hex":
+            elif save_format == "both":
+                row.insert(2, pretty_print_tape(tape))
                 row.insert(2, tape.hex())
+            elif save_format == "none":
+                pass  # only epoch, tape_idx, exec_steps
 
             writer.writerow(row)
 
