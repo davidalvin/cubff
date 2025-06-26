@@ -3,6 +3,7 @@ import tempfile
 import boto3
 import shutil
 import glob
+import json
 from bin import cubff
 from bff_grammar_package.grammar_core.io import save_run_metadata
 from histogram_tracker import HistogramTracker
@@ -49,6 +50,7 @@ CALLBACK_INTERVAL = 1
 MAX_EPOCHS = 4096
 BIN_WIDTH = 25
 LOG_EVERY = 16
+CLEANUP_INTERVAL = 128  # Delete old dat files every N epochs
 
 if not SAVE_TO_S3:
     os.makedirs(SAVE_PATH, exist_ok=True)
@@ -70,36 +72,36 @@ if not SAVE_TO_S3:
         flush_interval=16
     )
 
+
 def save_and_upload_csv(fn, *args, s3_key=None, **kwargs):
     if SAVE_TO_S3:
         with tempfile.TemporaryDirectory() as tmpdir:
             fn(*args, save_path=tmpdir, **kwargs)
-
-            written_file = next(
-                (f for f in os.listdir(tmpdir) if f.endswith(".csv")), None
-            )
+            written_file = next((f for f in os.listdir(tmpdir) if f.endswith(".csv")), None)
             if not written_file:
                 raise FileNotFoundError("No CSV file was written by the function.")
-
             full_file_path = os.path.join(tmpdir, written_file)
             s3.upload_file(full_file_path, S3_BUCKET, s3_key)
+            print(f"📤 Uploaded {written_file} → s3://{S3_BUCKET}/{s3_key}")
     else:
         fn(*args, save_path=SAVE_PATH, **kwargs)
 
 def callback(state):
     if state.epoch % LOG_EVERY == 0 or state.epoch == MAX_EPOCHS:
-        print(f"🧬 Epoch {state.epoch} | Brotli size: {state.brotli_size}")
+        print(f"ᾞc Epoch {state.epoch} | Brotli size: {state.brotli_size}")
 
     dat_filename = f"soup_epoch_{state.epoch:05d}.dat"
+    dat_path = os.path.join(params.save_to, dat_filename)
+
     if SAVE_TO_S3:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(state.soup)
-            tmp.flush()
-            s3.upload_file(tmp.name, S3_BUCKET, os.path.join(S3_PREFIX, dat_filename))
-        os.remove(tmp.name)
-    else:
-        with open(os.path.join(SAVE_PATH, dat_filename), "wb") as f:
+        with open(dat_path, "wb") as f:
             f.write(state.soup)
+        s3.upload_file(dat_path, S3_BUCKET, os.path.join(S3_PREFIX, dat_filename))
+        print(f"📂 Saved and uploaded {dat_filename} to S3")
+    else:
+        with open(dat_path, "wb") as f:
+            f.write(state.soup)
+        print(f"📂 Saved {dat_filename} locally")
 
     save_and_upload_csv(
         write_node_table,
@@ -119,16 +121,21 @@ def callback(state):
             s3_key=os.path.join(S3_PREFIX, f"edges_epoch_{state.epoch:05d}.csv")
         )
 
-    if state.epoch >= MAX_EPOCHS:
-        if SAVE_TO_S3:
-            save_and_upload_csv(
-                write_epoch_table,
-                max_epoch=MAX_EPOCHS,
-                s3_key=os.path.join(S3_PREFIX, "epoch_table.csv")
-            )
-        else:
-            write_epoch_table(SAVE_PATH, MAX_EPOCHS)
+    # Always clean up .dat files in output_dir every CLEANUP_INTERVAL
+    if state.epoch % CLEANUP_INTERVAL == 0:
+        print(f"🪚 Cleaning up .dat files in {params.save_to}...")
+        for f in glob.glob(os.path.join(params.save_to, "*.dat")):
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f"⚠️ Could not delete {f}: {e}")
 
+    if state.epoch >= MAX_EPOCHS:
+        save_and_upload_csv(
+            write_epoch_table,
+            max_epoch=MAX_EPOCHS,
+            s3_key=os.path.join(S3_PREFIX, "epoch_table.csv")
+        )
         metadata = {
             "NUM_PROGRAMS": NUM_PROGRAMS,
             "PROGRAM_SIZE": PROGRAM_SIZE,
@@ -144,50 +151,41 @@ def callback(state):
             "MAX_EPOCHS": MAX_EPOCHS,
             "BIN_WIDTH": BIN_WIDTH
         }
-        if SAVE_TO_S3:
-            with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
-                import json
-                json.dump(metadata, tmp, indent=2)
-                tmp.flush()
-                s3.upload_file(tmp.name, S3_BUCKET, os.path.join(S3_PREFIX, "run_metadata.json"))
-            os.remove(tmp.name)
-        else:
-            save_run_metadata(SAVE_PATH, state, metadata)
-
+        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+            json.dump(metadata, tmp, indent=2)
+            tmp.flush()
+            s3.upload_file(tmp.name, S3_BUCKET, os.path.join(S3_PREFIX, "run_metadata.json"))
+        os.remove(tmp.name)
+        print("📄 Saved run metadata.")
         return True
-
     return False
 
 def download_simulation_outputs(prefix, local_dir):
+    print("⏬ Downloading outputs from S3...")
     response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
-    edge_files = []
-
     for obj in response.get("Contents", []):
         key = obj["Key"]
         filename = os.path.basename(key)
         if filename.endswith(".csv"):
             dest_path = os.path.join(local_dir, filename)
             s3.download_file(S3_BUCKET, key, dest_path)
-
-            if filename.startswith("edges_epoch_"):
-                edge_files.append(dest_path)
-
+            print(f"⬇️ Downloaded {filename}")
 
 def combine_edges_files(local_dir):
-    edge_files = sorted(
-        f for f in os.listdir(local_dir) if f.startswith("edges_epoch_") and f.endswith(".csv")
-    )
+    print("🔗 Combining edge files...")
+    edge_files = sorted(f for f in os.listdir(local_dir) if f.startswith("edges_epoch_") and f.endswith(".csv"))
     combined_path = os.path.join(local_dir, "edges.csv")
-
     with open(combined_path, "w") as f_out:
         for i, fname in enumerate(edge_files):
             with open(os.path.join(local_dir, fname), "r") as f_in:
                 if i > 0:
-                    next(f_in)  # skip header except on the first file
+                    next(f_in)  # skip header
                 f_out.writelines(f_in)
+    print("✅ Combined edges into edges.csv")
 
 
-# === RUN ===
+print("🌱 Starting fresh simulation...")
+
 params = cubff.SimulationParams()
 params.num_programs = NUM_PROGRAMS
 params.seed = SEED
@@ -198,42 +196,41 @@ params.permute_programs = PERMUTE_PROGRAMS
 params.fixed_shuffle = FIXED_SHUFFLE
 params.callback_interval = CALLBACK_INTERVAL
 params.save_interval = SAVE_INTERVAL
-temp_output_dir = tempfile.mkdtemp() if SAVE_TO_S3 else SAVE_PATH
-params.save_to = temp_output_dir
+
+
+output_dir = tempfile.mkdtemp(prefix="cubff_tmp_") if SAVE_TO_S3 else SAVE_PATH
+params.save_to = output_dir
 
 cubff.ResetColors()
 print("▶️ Launching simulation...")
 language.RunSimulation(params, None, callback)
 print("✅ Simulation complete.")
 
-print("\n📊 Post-run edge derivation...")
 if SAVE_TO_S3:
-    download_simulation_outputs(S3_PREFIX, temp_output_dir)
-    combine_edges_files(temp_output_dir)
+    print("\n📊 Post-run edge derivation...")
+    download_simulation_outputs(S3_PREFIX, output_dir)
+    combine_edges_files(output_dir)
 
     print("🧾 Writing step-based edges...")
-    write_step_edges(temp_output_dir)
-
+    write_step_edges(output_dir)
     print("📊 Writing binned step-based edges...")
-    write_binned_step_edges(temp_output_dir, bin_size=BIN_WIDTH)
-
+    write_binned_step_edges(output_dir, bin_size=BIN_WIDTH)
     print("📈 Writing Gephi weighted edges...")
-    write_gephi_weighted_edges_from_binned_steps(temp_output_dir, bin_size=BIN_WIDTH)
-
+    write_gephi_weighted_edges_from_binned_steps(output_dir, bin_size=BIN_WIDTH)
     print("🧩 Writing Gephi node labels...")
-    write_gephi_nodes_from_bins(temp_output_dir, bin_size=BIN_WIDTH)
+    write_gephi_nodes_from_bins(output_dir, bin_size=BIN_WIDTH)
 
-    # ✅ Upload post-processing outputs
-    for fname in os.listdir(temp_output_dir):
-        local_path = os.path.join(temp_output_dir, fname)
+    for fname in os.listdir(output_dir):
+        local_path = os.path.join(output_dir, fname)
         if os.path.isfile(local_path) and fname.endswith(".csv"):
             s3_key = os.path.join(S3_PREFIX, fname)
             s3.upload_file(local_path, S3_BUCKET, s3_key)
             print(f"📤 Uploaded {fname} → s3://{S3_BUCKET}/{s3_key}")
 
-    shutil.rmtree(temp_output_dir, ignore_errors=True)
-    print(f"🧹 Cleaned up temp directory: {temp_output_dir}")
+    shutil.rmtree(output_dir, ignore_errors=True)
+    print(f"🧹 Cleaned up temp directory: {output_dir}")
 else:
+    print("\n📊 Post-run edge derivation...")
     write_step_edges(SAVE_PATH)
     write_binned_step_edges(SAVE_PATH, bin_size=BIN_WIDTH)
     write_gephi_weighted_edges_from_binned_steps(SAVE_PATH, bin_size=BIN_WIDTH)
