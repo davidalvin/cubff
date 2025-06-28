@@ -177,11 +177,11 @@ def run_postprocessing():
         print(f"   ❌ Error in write_gephi_nodes_from_bins: {e}")
 
     print("➡️  Step 5: Generating epoch lineage visualization")
-    try:
-        plot_epoch_lineage_graph(LOCAL_TMP, MAX_EPOCHS, BIN_WIDTH)
-        print("   ✅ Epoch lineage plot generated.")
-    except Exception as e:
-        print(f"   ❌ Error in plot_epoch_lineage_graph: {e}")
+    # try:
+    #     plot_epoch_lineage_graph(LOCAL_TMP, MAX_EPOCHS, BIN_WIDTH)
+    #     print("   ✅ Epoch lineage plot generated.")
+    # except Exception as e:
+    #     print(f"   ❌ Error in plot_epoch_lineage_graph: {e}")
 
     print("✅ Post-processing complete.")
 
