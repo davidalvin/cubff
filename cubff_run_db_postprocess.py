@@ -6,7 +6,8 @@ from db_helpers import (
     write_step_edges,
     write_binned_step_edges,
     write_gephi_weighted_edges_from_binned_steps,
-    write_gephi_nodes_from_bins
+    write_gephi_nodes_from_bins,
+    plot_epoch_lineage_graph
 )
 
 # === CONFIGURATION ===
@@ -14,6 +15,7 @@ S3_BUCKET = "bff-grammar"
 S3_PREFIX = "soup/db_run_test/"
 LOCAL_TMP = "./tmp_postprocess"
 BIN_WIDTH = 25
+MAX_EPOCHS = 128  # Set to 128 for testing, change to 4096 for full run
 
 s3 = boto3.client("s3")
 os.makedirs(LOCAL_TMP, exist_ok=True)
@@ -57,7 +59,7 @@ def summarize_s3_contents():
         print("❗ You may want to delete these before uploading new versions.")
 
 def download_all_edges():
-    print("\n⏬ Downloading all edge CSVs from S3...")
+    print(f"\n⏬ Downloading edge CSVs from S3 (up to epoch {MAX_EPOCHS})...")
     paginator = s3.get_paginator("list_objects_v2")
     page_iterator = paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX)
 
@@ -69,6 +71,17 @@ def download_all_edges():
             key = obj["Key"]
             fname = os.path.basename(key)
             if fname.startswith("edges_epoch_") and fname.endswith(".csv"):
+                # Extract epoch number from filename
+                try:
+                    epoch_str = fname.replace("edges_epoch_", "").replace(".csv", "")
+                    epoch_num = int(epoch_str)
+                    if epoch_num > MAX_EPOCHS:
+                        print(f"    - Skipping {key} (epoch {epoch_num} > {MAX_EPOCHS})")
+                        continue
+                except ValueError:
+                    print(f"    - Skipping {key} (could not parse epoch number)")
+                    continue
+                
                 dest_path = os.path.join(LOCAL_TMP, fname)
                 print(f"    - [{count+1}] Downloading {key} → {dest_path} ...", end=" ")
                 try:
@@ -79,6 +92,41 @@ def download_all_edges():
                     print(f"❌ Failed: {e}")
                     errors += 1
     print(f"✅ Downloaded {count} edge CSVs. {errors} errors.")
+
+def download_all_nodes():
+    print(f"\n⏬ Downloading node CSVs from S3 (up to epoch {MAX_EPOCHS})...")
+    paginator = s3.get_paginator("list_objects_v2")
+    page_iterator = paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX)
+
+    count = 0
+    errors = 0
+    for page_num, page in enumerate(page_iterator, 1):
+        print(f"  - Processing S3 page {page_num}...")
+        for obj_num, obj in enumerate(page.get("Contents", []), 1):
+            key = obj["Key"]
+            fname = os.path.basename(key)
+            if fname.startswith("nodes_epoch_") and fname.endswith(".csv"):
+                # Extract epoch number from filename
+                try:
+                    epoch_str = fname.replace("nodes_epoch_", "").replace(".csv", "")
+                    epoch_num = int(epoch_str)
+                    if epoch_num > MAX_EPOCHS:
+                        print(f"    - Skipping {key} (epoch {epoch_num} > {MAX_EPOCHS})")
+                        continue
+                except ValueError:
+                    print(f"    - Skipping {key} (could not parse epoch number)")
+                    continue
+                
+                dest_path = os.path.join(LOCAL_TMP, fname)
+                print(f"    - [{count+1}] Downloading {key} → {dest_path} ...", end=" ")
+                try:
+                    s3.download_file(S3_BUCKET, key, dest_path)
+                    print("✅ Success")
+                    count += 1
+                except Exception as e:
+                    print(f"❌ Failed: {e}")
+                    errors += 1
+    print(f"✅ Downloaded {count} node CSVs. {errors} errors.")
 
 def combine_edges():
     print("\n🔗 Combining edge files into a single CSV...")
@@ -128,6 +176,13 @@ def run_postprocessing():
     except Exception as e:
         print(f"   ❌ Error in write_gephi_nodes_from_bins: {e}")
 
+    print("➡️  Step 5: Generating epoch lineage visualization")
+    try:
+        plot_epoch_lineage_graph(LOCAL_TMP, MAX_EPOCHS, BIN_WIDTH)
+        print("   ✅ Epoch lineage plot generated.")
+    except Exception as e:
+        print(f"   ❌ Error in plot_epoch_lineage_graph: {e}")
+
     print("✅ Post-processing complete.")
 
 def upload_outputs():
@@ -147,6 +202,7 @@ def main():
     print("\n=== cubff_run_db_postprocess.py: START ===")
     summarize_s3_contents()
     download_all_edges()
+    download_all_nodes()
     combine_edges()
     run_postprocessing()
     upload_outputs()
