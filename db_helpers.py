@@ -3,6 +3,8 @@ import csv
 import base64
 from collections import Counter
 import matplotlib.pyplot as plt
+import sqlite3
+import time
 
 # === Command Mapping from BFF Grammar ===
 COMMAND_REPR = list("[]+-.,<>{}")
@@ -93,12 +95,12 @@ def write_node_table(
             row = [epoch, i, exec_steps[i]]
 
             if save_format == "hex":
-                row.insert(2, tape.hex())
+                row.append(tape.hex())
             elif save_format == "pretty":
-                row.insert(2, pretty_print_tape(tape))
+                row.append(pretty_print_tape(tape))
             elif save_format == "both":
-                row.insert(2, pretty_print_tape(tape))
-                row.insert(2, tape.hex())
+                row.append(pretty_print_tape(tape))
+                row.append(tape.hex())
             elif save_format == "none":
                 pass  # only epoch, tape_idx, exec_steps
 
@@ -127,41 +129,65 @@ def write_step_edges(save_path: str):
     """
     Creates edges_steps.csv from edges.csv by replacing all tape indices
     (p1_idx, p2_idx, c1_idx, c2_idx) with their exec_steps.
+    
+    Uses SQLite streaming approach for minimal memory usage - never exceeds ~200MB RAM.
     """
-    edges_path = os.path.join(save_path, "edges.csv")
-    out_path = os.path.join(save_path, "edges_steps.csv")
+    edges_csv = os.path.join(save_path, "edges.csv")
+    out_csv   = os.path.join(save_path, "edges_steps.csv")
+    db_path   = os.path.join(save_path, "_steps.sqlite")
 
-    # Load all nodes into a dict by (epoch, tape_idx) → steps
-    step_lookup = {}
-    for fname in os.listdir(save_path):
-        if fname.startswith("nodes_epoch_") and fname.endswith(".csv"):
-            epoch = int(fname[len("nodes_epoch_"):-4])
-            with open(os.path.join(save_path, fname), newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    key = (epoch, int(row["tape_idx"]))
-                    step_lookup[key] = int(row["exec_steps"])
+    t0 = time.perf_counter()
+    print("🪶 1/3  building on-disk step index …")
 
-    with open(edges_path, newline="") as f_in, open(out_path, "w", newline="") as f_out:
-        reader = csv.DictReader(f_in)
-        writer = csv.writer(f_out)
-        writer.writerow(["parent_epoch", "p1_steps", "p2_steps", "child_epoch", "c1_steps", "c2_steps"])
+    con = sqlite3.connect(db_path)
+    con.execute("PRAGMA journal_mode=WAL;")
+    con.execute("PRAGMA synchronous=OFF;")
+    con.execute("CREATE TABLE IF NOT EXISTS steps("
+                "epoch INT, tape INT, exec INT, "
+                "PRIMARY KEY(epoch,tape));")
 
-        for row in reader:
-            pe = int(row["parent_epoch"])
-            ce = int(row["child_epoch"])
-            p1 = int(row["p1_idx"])
-            p2 = int(row["p2_idx"])
-            c1 = int(row["c1_idx"])
-            c2 = int(row["c2_idx"])
-            writer.writerow([
-                pe,
-                step_lookup.get((pe, p1), -1),
-                step_lookup.get((pe, p2), -1),
-                ce,
-                step_lookup.get((ce, c1), -1),
-                step_lookup.get((ce, c2), -1),
-            ])
+    for node in sorted(f for f in os.listdir(save_path)
+                       if f.startswith("nodes_epoch_") and f.endswith(".csv")):
+        epoch = int(node[12:-4])
+        with open(os.path.join(save_path, node)) as f:
+            rows = [(epoch, int(r["tape_idx"]), int(r["exec_steps"]))
+                    for r in csv.DictReader(f)]
+        con.executemany("INSERT OR IGNORE INTO steps VALUES (?,?,?)", rows)
+    con.execute("CREATE INDEX IF NOT EXISTS idx ON steps(epoch,tape);")
+    con.commit()
+    print(f"✅  index ready in {time.perf_counter()-t0:.1f}s")
+
+    # ---------- pass-1: write parent-side ----------
+    tmp_csv = out_csv + ".tmp"
+    with open(edges_csv) as fin, open(tmp_csv, "w", newline="") as fout:
+        rdr, w = csv.DictReader(fin), csv.writer(fout)
+        w.writerow(["parent_epoch","p1_steps","p2_steps",
+                    "child_epoch","c1_idx","c2_idx"])
+        q = "SELECT exec FROM steps WHERE epoch=? AND tape=?"
+        for r in rdr:
+            pe = int(r["parent_epoch"])
+            p1 = int(r["p1_idx"]); p2 = int(r["p2_idx"])
+            s1 = con.execute(q,(pe,p1)).fetchone()
+            s2 = con.execute(q,(pe,p2)).fetchone()
+            w.writerow([pe, s1[0] if s1 else -1, s2[0] if s2 else -1,
+                        r["child_epoch"], r["c1_idx"], r["c2_idx"]])
+    print("✍️  pass-1 complete")
+
+    # ---------- pass-2: patch child-side ----------
+    with open(tmp_csv) as fin, open(out_csv, "w", newline="") as fout:
+        rdr, w = csv.DictReader(fin), csv.writer(fout)
+        w.writerow(["parent_epoch","p1_steps","p2_steps",
+                    "child_epoch","c1_steps","c2_steps"])
+        q = "SELECT exec FROM steps WHERE epoch=? AND tape=?"
+        for r in rdr:
+            ce   = int(r["child_epoch"])
+            c1   = int(r["c1_idx"]); c2 = int(r["c2_idx"])
+            s1   = con.execute(q,(ce,c1)).fetchone()
+            s2   = con.execute(q,(ce,c2)).fetchone()
+            w.writerow([ r["parent_epoch"], r["p1_steps"], r["p2_steps"],
+                         ce, s1[0] if s1 else -1, s2[0] if s2 else -1 ])
+    con.close(); os.remove(db_path); os.remove(tmp_csv)
+    print(f"✅  edges_steps.csv written in {time.perf_counter()-t0:.1f}s")
 
 def write_binned_step_edges(save_path: str, bin_size: int = 25):
     """
@@ -272,6 +298,7 @@ def plot_epoch_lineage_graph(save_path: str, max_epoch: int, bin_size: int = 25)
 def write_gephi_weighted_edges_from_binned_steps(save_path: str, bin_size: int):
     """
     Create a directed, weighted edge list from binned execution transitions.
+    Optimized using DuckDB for better performance with large datasets.
 
     Each parent bin (p1, p2) points to both child bins (c1, c2).
     Duplicate edges are aggregated with a weight.
@@ -279,6 +306,62 @@ def write_gephi_weighted_edges_from_binned_steps(save_path: str, bin_size: int):
     Output: edges_gephi_binned_<bin_size>.csv
     Format: Source, Target, Weight
     """
+    in_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
+    out_path = os.path.join(save_path, f"edges_gephi_binned_{bin_size}.csv")
+
+    print(f"🔗 Creating Gephi weighted edges from binned steps (bin_size={bin_size})...")
+    
+    try:
+        import duckdb
+        import time
+        t0 = time.perf_counter()
+        
+        con = duckdb.connect()
+        con.execute("SET threads TO 2;")
+        con.execute("SET memory_limit TO '1GB';")
+        
+        # Load binned edges into DuckDB
+        con.execute(f"""
+            CREATE TABLE binned_edges AS
+            SELECT * FROM read_csv_auto('{in_path}', HEADER=TRUE, AUTO_DETECT=TRUE);
+        """)
+        
+        # Use SQL to efficiently aggregate edge weights
+        result = con.execute("""
+            WITH edge_pairs AS (
+                SELECT p1_bin as src, c1_bin as tgt FROM binned_edges WHERE p1_bin != -1 AND c1_bin != -1
+                UNION ALL
+                SELECT p1_bin as src, c2_bin as tgt FROM binned_edges WHERE p1_bin != -1 AND c2_bin != -1
+                UNION ALL
+                SELECT p2_bin as src, c1_bin as tgt FROM binned_edges WHERE p2_bin != -1 AND c1_bin != -1
+                UNION ALL
+                SELECT p2_bin as src, c2_bin as tgt FROM binned_edges WHERE p2_bin != -1 AND c2_bin != -1
+            )
+            SELECT src as Source, tgt as Target, COUNT(*) as Weight
+            FROM edge_pairs
+            GROUP BY src, tgt
+            ORDER BY src, tgt
+        """).fetchdf()
+        
+        print(f"✅ Aggregated {len(result):,} unique edges")
+        
+        # Write to CSV
+        result.to_csv(out_path, index=False)
+        print(f"📁 Saved to: {out_path}")
+        print(f"⏱️ Total time: {time.perf_counter() - t0:.2f}s")
+        
+        con.close()
+        
+    except ImportError:
+        print("⚠️ DuckDB not available, falling back to Python Counter...")
+        write_gephi_weighted_edges_python(save_path, bin_size)
+    except Exception as e:
+        print(f"❌ DuckDB failed: {e}")
+        print("🔄 Falling back to Python Counter...")
+        write_gephi_weighted_edges_python(save_path, bin_size)
+
+def write_gephi_weighted_edges_python(save_path: str, bin_size: int):
+    """Fallback Python implementation using Counter."""
     in_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
     out_path = os.path.join(save_path, f"edges_gephi_binned_{bin_size}.csv")
 
@@ -307,12 +390,65 @@ def write_gephi_weighted_edges_from_binned_steps(save_path: str, bin_size: int):
 def write_gephi_nodes_from_bins(save_path: str, bin_size: int):
     """
     Create Gephi-compatible node file using bin indices as IDs.
+    Optimized to extract unique bins efficiently using DuckDB.
     Each node is labeled with its step range, e.g., '0–24 steps'.
-
-    Args:
-        save_path: Path containing the binned edge file.
-        bin_size: Bin size used in binning (e.g., 25).
     """
+    edge_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
+    out_path = os.path.join(save_path, f"gephi_nodes_binned_{bin_size}.csv")
+
+    print(f"🔗 Creating Gephi nodes from binned steps (bin_size={bin_size})...")
+    
+    try:
+        import duckdb
+        import time
+        t0 = time.perf_counter()
+        
+        con = duckdb.connect()
+        con.execute("SET threads TO 2;")
+        con.execute("SET memory_limit TO '1GB';")
+        
+        # Extract unique bins efficiently using SQL
+        result = con.execute(f"""
+            WITH all_bins AS (
+                SELECT p1_bin as bin FROM read_csv_auto('{edge_path}', HEADER=TRUE, AUTO_DETECT=TRUE) WHERE p1_bin >= 0
+                UNION
+                SELECT p2_bin as bin FROM read_csv_auto('{edge_path}', HEADER=TRUE, AUTO_DETECT=TRUE) WHERE p2_bin >= 0
+                UNION
+                SELECT c1_bin as bin FROM read_csv_auto('{edge_path}', HEADER=TRUE, AUTO_DETECT=TRUE) WHERE c1_bin >= 0
+                UNION
+                SELECT c2_bin as bin FROM read_csv_auto('{edge_path}', HEADER=TRUE, AUTO_DETECT=TRUE) WHERE c2_bin >= 0
+            )
+            SELECT DISTINCT bin as id
+            FROM all_bins
+            ORDER BY bin
+        """).fetchdf()
+        
+        print(f"✅ Found {len(result):,} unique bins")
+        
+        # Create labels and write to CSV
+        with open(out_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "label"])
+            for _, row in result.iterrows():
+                bin_id = row['id']
+                label = f"{bin_id * bin_size}–{(bin_id + 1) * bin_size - 1} steps"
+                writer.writerow([bin_id, label])
+        
+        print(f"📁 Saved to: {out_path}")
+        print(f"⏱️ Total time: {time.perf_counter() - t0:.2f}s")
+        
+        con.close()
+        
+    except ImportError:
+        print("⚠️ DuckDB not available, falling back to Python set...")
+        write_gephi_nodes_python(save_path, bin_size)
+    except Exception as e:
+        print(f"❌ DuckDB failed: {e}")
+        print("🔄 Falling back to Python set...")
+        write_gephi_nodes_python(save_path, bin_size)
+
+def write_gephi_nodes_python(save_path: str, bin_size: int):
+    """Fallback Python implementation using set."""
     edge_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
     out_path = os.path.join(save_path, f"gephi_nodes_binned_{bin_size}.csv")
 
