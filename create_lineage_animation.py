@@ -736,8 +736,15 @@ def generate_colormap_legend(save_path, max_weight, colormap_name='plasma'):
             colormap = cm.get_cmap(colormap_name)
         norm = mcolors.LogNorm(vmin=1, vmax=max_weight)
         
-        plt.figure(figsize=(8, 1))
-        cb = plt.colorbar(cm.ScalarMappable(norm=norm, cmap=colormap), orientation='horizontal')
+        # Create figure and axes explicitly to avoid colorbar error
+        fig, ax = plt.subplots(figsize=(8, 1))
+        fig.subplots_adjust(bottom=0.5)
+        
+        cb = fig.colorbar(
+            cm.ScalarMappable(norm=norm, cmap=colormap),
+            cax=ax,
+            orientation='horizontal'
+        )
         cb.set_label('Edge Frequency (log-scaled)', fontsize=12)
         cb.ax.tick_params(labelsize=10)
         
@@ -935,7 +942,9 @@ def create_lineage_animation(save_path, bin_size=25, window_size=32, fps=2, outp
             return None
         
         # Build ffmpeg command
-        frame_pattern = os.path.join(temp_dir, "frame_%04d.png")
+        # Use dynamic padding to match the frame filenames
+        padding = len(str(total_frames)) if total_frames > 0 else 4
+        frame_pattern = os.path.join(temp_dir, f"frame_%0{padding}d.png")
         cmd = [
             'ffmpeg', '-y',  # Overwrite output file
             '-framerate', str(fps),
