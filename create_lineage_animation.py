@@ -210,9 +210,8 @@ def create_frame_pil_streaming(save_path, bin_size, start_epoch, end_epoch, max_
                     margin <= x2 <= width - margin and margin <= y2 <= height - margin):
                     if is_weighted and max_weight > 0:
                         # Use matplotlib colormap for better perceptual uniformity
-                        rgba = colormap(norm(weight))
-                        # Convert numpy array to regular Python values
-                        rgb = tuple(int(255 * float(c)) for c in rgba[:3])  # Ignore alpha
+                        rgba = colormap(float(norm(weight)))  # Normalize and apply colormap properly
+                        rgb = tuple(int(255 * c) for c in rgba[:3])  # Use R, G, B from colormap (drop alpha)
                     else:
                         rgb = (0, 100, 200)  # No alpha
                     draw.line([(x1, y1), (x2, y2)], fill=rgb, width=1)
@@ -422,9 +421,8 @@ def draw_frame_from_edges(window_lines, start_epoch, end_epoch, max_bin, frame_n
                     margin <= x2 <= width - margin and margin <= y2 <= height - margin):
                     if is_weighted and max_weight > 0:
                         # Use matplotlib colormap for better perceptual uniformity
-                        rgba = colormap(norm(weight))
-                        # Convert numpy array to regular Python values
-                        rgb = tuple(int(255 * float(c)) for c in rgba[:3])  # Ignore alpha
+                        rgba = colormap(float(norm(weight)))  # Normalize and apply colormap properly
+                        rgb = tuple(int(255 * c) for c in rgba[:3])  # Use R, G, B from colormap (drop alpha)
                     else:
                         rgb = (0, 100, 200)  # No alpha
                     draw.line([(x1, y1), (x2, y2)], fill=rgb, width=1)
