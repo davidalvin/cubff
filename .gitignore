@@ -1,4 +1,3 @@
-cat <<EOF > .gitignore
 # Compiled binaries and build outputs
 bin/
 build/
@@ -8,6 +7,8 @@ build/
 
 # Swap and temp files
 *.swp
+*.swo
+*~
 
 # Experiment outputs
 experimentlogs/
@@ -17,7 +18,7 @@ experimentlogs/
 *.png
 *.json
 
-# Text files
+# Text files (be careful - you might want specific .txt files)
 *.txt
 
 # Python bytecode and caches
@@ -29,19 +30,151 @@ experimentlogs/
 # Python virtual environment and version control
 .venv/
 env/
+venv/
 .python-version
 
 # Pyenv specific files
 pyenv*
-.venv/
 
 # VSCode or other editor settings
 .vscode/
 .idea/
+*.sublime-*
 
 # OS system files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
 # Logs
 *.log
-EOF
+
+# EC2 and AWS specific additions
+# ==============================
+
+# Setup and configuration capture files
+setup-capture/
+setup-capture.tar.gz
+setup-capture.zip
+setup-new-instance.sh
+
+# System package lists
+*-packages.txt
+installed-packages.txt
+apt-packages.txt
+
+# Python requirements (you may want to be selective here)
+# requirements.txt  # Uncomment if you don't want to track requirements
+requirements-*.txt
+*-requirements.txt
+
+# System configuration backups
+*-additions.txt
+bashrc-additions.txt
+*-config.txt
+ssh-config.txt
+gitconfig.txt
+vimrc.txt
+
+# System information files
+*-info.txt
+*-summary.txt
+setup-summary.txt
+swap-info.txt
+running-services.txt
+python-version.txt
+
+# Git repository information
+git-repos.txt
+git-summary.txt
+git-changes-*.txt
+
+# AWS/Cloud metadata
+security-groups.json
+*-metadata.txt
+
+# Temporary files
+*.tmp
+setup-*.log
+
+# Personal configuration backups
+.ssh-backup/
+.aws-backup/
+config-backup/
+
+# Sensitive files
+.env
+.env.local
+.env.production
+.env.*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+known_hosts
+authorized_keys
+
+# Compressed files that might contain sensitive data
+*.tar.gz
+*.zip
+*.7z
+*.rar
+setup-*.tar.*
+config-*.zip
+
+# Data files
+*.csv
+*.parquet
+
+# Temporary directories
+tmp_postprocess/
+tmp_*/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+aws-env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
