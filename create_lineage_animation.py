@@ -10,6 +10,8 @@ import shutil
 import gc
 from PIL import Image, ImageDraw, ImageFont
 import math
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 
 def get_epoch_range_from_file(save_path, bin_size):
     """Get the min and max epochs by scanning the file without loading everything."""
@@ -85,8 +87,8 @@ def load_edges_for_window_streaming(save_path, bin_size, start_epoch, end_epoch)
     """Load edges for window using streaming approach - only keep minimal data in memory."""
     edges_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
     
-    # Use sets to avoid duplicates and minimize memory
-    edge_coords = set()
+    # Use defaultdict to accumulate edge weights
+    edge_coords = defaultdict(int)
     point_coords = set()
     processed_rows = 0
     
@@ -108,14 +110,15 @@ def load_edges_for_window_streaming(save_path, bin_size, start_epoch, end_epoch)
                         for cb in cbins:
                             if pb >= 0 and cb >= 0:
                                 # Store as tuples for memory efficiency
-                                edge_coords.add(((pe, pb), (ce, cb)))
+                                edge_key = ((pe, pb), (ce, cb))
+                                edge_coords[edge_key] += 1
                                 point_coords.add((pe, pb))
                                 point_coords.add((ce, cb))
             except Exception as e:
                 continue
     
-    # Convert to lists only at the end
-    lines = list(edge_coords)
+    # Convert to list of (edge, weight) tuples
+    lines = list(edge_coords.items())
     edge_count = len(lines)
     
     # Clear sets to free memory
@@ -151,29 +154,68 @@ def create_frame_pil_streaming(save_path, bin_size, start_epoch, end_epoch, max_
     for i in range(0, epoch_range + 1, max(1, epoch_range // 10)):
         x = margin + i * x_scale
         draw.line([(x, margin), (x, height - margin)], fill=grid_color, width=1)
-    
     for i in range(0, max_bin + 1, max(1, (max_bin + 1) // 10)):
         y = height - margin - i * y_scale
         draw.line([(margin, y), (width - margin, y)], fill=grid_color, width=1)
     
     # Draw edges (lines) - process in chunks to avoid memory spikes
     if window_lines:
+        # Check if window_lines contains weights - be more robust
+        is_weighted = False
+        if len(window_lines) > 0:
+            first_item = window_lines[0]
+            is_weighted = (isinstance(first_item, tuple) and 
+                          len(first_item) == 2 and 
+                          isinstance(first_item[1], int) and
+                          isinstance(first_item[0], tuple) and
+                          len(first_item[0]) == 2)
+        
+        if is_weighted:
+            max_weight = max(weight for _, weight in window_lines)
+            # Use matplotlib colormap for better perceptual uniformity
+            try:
+                # Try newer API first
+                colormap = cm.colormaps['plasma']
+            except AttributeError:
+                # Fallback to older API
+                colormap = cm.get_cmap('plasma')
+            norm = mcolors.LogNorm(vmin=1, vmax=max_weight)
+        else:
+            max_weight = 1
+            
         chunk_size = 10000  # Process 10k edges at a time
         for i in range(0, len(window_lines), chunk_size):
             chunk = window_lines[i:i+chunk_size]
-            
-            for line in chunk:
+            for item in chunk:
+                if is_weighted:
+                    line, weight = item
+                    # Ensure line has the expected structure
+                    assert isinstance(line, tuple) and len(line) == 2, f"Invalid line structure: {line}"
+                    assert isinstance(line[0], tuple) and len(line[0]) == 2, f"Invalid start point: {line[0]}"
+                    assert isinstance(line[1], tuple) and len(line[1]) == 2, f"Invalid end point: {line[1]}"
+                else:
+                    line = item
+                    weight = 1
+                    # Ensure line has the expected structure
+                    assert isinstance(line, tuple) and len(line) == 2, f"Invalid line structure: {line}"
+                    assert isinstance(line[0], tuple) and len(line[0]) == 2, f"Invalid start point: {line[0]}"
+                    assert isinstance(line[1], tuple) and len(line[1]) == 2, f"Invalid end point: {line[1]}"
+                
                 x1 = margin + (line[0][0] - start_epoch) * x_scale
                 y1 = height - margin - line[0][1] * y_scale
                 x2 = margin + (line[1][0] - start_epoch) * x_scale
                 y2 = height - margin - line[1][1] * y_scale
-                
                 # Only draw if both points are within bounds
                 if (margin <= x1 <= width - margin and margin <= y1 <= height - margin and
                     margin <= x2 <= width - margin and margin <= y2 <= height - margin):
-                    draw.line([(x1, y1), (x2, y2)], fill=(0, 100, 200, 100), width=1)
-            
-            # Clear chunk from memory
+                    if is_weighted and max_weight > 0:
+                        # Use matplotlib colormap for better perceptual uniformity
+                        rgba = colormap(norm(weight))
+                        # Convert numpy array to regular Python values
+                        rgb = tuple(int(255 * float(c)) for c in rgba[:3])  # Ignore alpha
+                    else:
+                        rgb = (0, 100, 200)  # No alpha
+                    draw.line([(x1, y1), (x2, y2)], fill=rgb, width=1)
             del chunk
             gc.collect()
     
@@ -181,46 +223,42 @@ def create_frame_pil_streaming(save_path, bin_size, start_epoch, end_epoch, max_
     if window_lines:
         # Collect unique points
         points = set()
-        for line in window_lines:
+        for item in window_lines:
+            # Handle both weighted (edge, weight) and unweighted edge formats
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int):
+                line = item[0]  # (edge, weight) format
+            else:
+                line = item     # edge format
             points.add(line[0])
             points.add(line[1])
+        
+        # (Optional) If weighted, you could compute node degree/weight here for point size/opacity
+        # node_weight = defaultdict(int)
+        # if is_weighted:
+        #     for (line, weight) in window_lines:
+        #         node_weight[line[0]] += weight
+        #         node_weight[line[1]] += weight
         
         # Draw points in chunks
         point_list = list(points)
         chunk_size = 5000
         for i in range(0, len(point_list), chunk_size):
             chunk = point_list[i:i+chunk_size]
-            
             for point in chunk:
                 x = margin + (point[0] - start_epoch) * x_scale
                 y = height - margin - point[1] * y_scale
-                
                 if margin <= x <= width - margin and margin <= y <= height - margin:
-                    draw.ellipse([x-1, y-1, x+1, y+1], fill=(0, 0, 0, 25))
-            
+                    # (Optional) Use node_weight[point] to scale size/opacity
+                    draw.ellipse([x-1, y-1, x+1, y+1], fill=(0, 0, 0))
             del chunk
             gc.collect()
-        
         del points, point_list
     
-    # Draw title
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-    except:
-        try:
-            font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 16)
-        except:
-            font = ImageFont.load_default()
-    
-    title = f"Lineage Evolution - Epochs {start_epoch} to {end_epoch} ({edge_count} transitions)"
-    draw.text((margin, 20), title, fill='black', font=font)
-    
-    # Draw axis labels
-    draw.text((width//2, height - 30), "Epoch", fill='black', font=font)
-    draw.text((20, height//2), "Step Bin", fill='black', font=font, angle=90)
-    
     # Save frame
-    frame_path = os.path.join(output_dir, f"frame_{frame_num:04d}.png")
+    # Use dynamic padding based on total_frames to support large frame counts
+    padding = len(str(total_frames)) if total_frames > 0 else 4
+    frame_filename = f"frame_{frame_num:0{padding}d}.png"
+    frame_path = os.path.join(output_dir, frame_filename)
     img.save(frame_path, 'PNG', optimize=True)
     
     # Explicitly delete objects to free memory
@@ -267,8 +305,8 @@ def load_edges_for_window_indexed(save_path, bin_size, start_epoch, end_epoch, e
         if epoch in epoch_positions:
             relevant_rows.update(epoch_positions[epoch])
     
-    # Use sets to avoid duplicates and minimize memory
-    edge_coords = set()
+    # Use defaultdict to accumulate edge weights
+    edge_coords = defaultdict(int)
     processed_rows = 0
     
     # Read only the relevant rows
@@ -291,11 +329,12 @@ def load_edges_for_window_indexed(save_path, bin_size, start_epoch, end_epoch, e
                         for pb in pbins:
                             for cb in cbins:
                                 if pb >= 0 and cb >= 0:
-                                    edge_coords.add(((pe, pb), (ce, cb)))
+                                    edge_key = ((pe, pb), (ce, cb))
+                                    edge_coords[edge_key] += 1
                 except Exception as e:
                     continue
     
-    lines = list(edge_coords)
+    lines = list(edge_coords.items())  # [(edge_tuple, weight)]
     edge_count = len(lines)
     
     del edge_coords, relevant_rows
@@ -327,29 +366,68 @@ def draw_frame_from_edges(window_lines, start_epoch, end_epoch, max_bin, frame_n
     for i in range(0, epoch_range + 1, max(1, epoch_range // 10)):
         x = margin + i * x_scale
         draw.line([(x, margin), (x, height - margin)], fill=grid_color, width=1)
-    
     for i in range(0, max_bin + 1, max(1, (max_bin + 1) // 10)):
         y = height - margin - i * y_scale
         draw.line([(margin, y), (width - margin, y)], fill=grid_color, width=1)
     
     # Draw edges (lines) - process in chunks to avoid memory spikes
     if window_lines:
+        # Check if window_lines contains weights - be more robust
+        is_weighted = False
+        if len(window_lines) > 0:
+            first_item = window_lines[0]
+            is_weighted = (isinstance(first_item, tuple) and 
+                          len(first_item) == 2 and 
+                          isinstance(first_item[1], int) and
+                          isinstance(first_item[0], tuple) and
+                          len(first_item[0]) == 2)
+        
+        if is_weighted:
+            max_weight = max(weight for _, weight in window_lines)
+            # Use matplotlib colormap for better perceptual uniformity
+            try:
+                # Try newer API first
+                colormap = cm.colormaps['plasma']
+            except AttributeError:
+                # Fallback to older API
+                colormap = cm.get_cmap('plasma')
+            norm = mcolors.LogNorm(vmin=1, vmax=max_weight)
+        else:
+            max_weight = 1
+            
         chunk_size = 10000  # Process 10k edges at a time
         for i in range(0, len(window_lines), chunk_size):
             chunk = window_lines[i:i+chunk_size]
-            
-            for line in chunk:
+            for item in chunk:
+                if is_weighted:
+                    line, weight = item
+                    # Ensure line has the expected structure
+                    assert isinstance(line, tuple) and len(line) == 2, f"Invalid line structure: {line}"
+                    assert isinstance(line[0], tuple) and len(line[0]) == 2, f"Invalid start point: {line[0]}"
+                    assert isinstance(line[1], tuple) and len(line[1]) == 2, f"Invalid end point: {line[1]}"
+                else:
+                    line = item
+                    weight = 1
+                    # Ensure line has the expected structure
+                    assert isinstance(line, tuple) and len(line) == 2, f"Invalid line structure: {line}"
+                    assert isinstance(line[0], tuple) and len(line[0]) == 2, f"Invalid start point: {line[0]}"
+                    assert isinstance(line[1], tuple) and len(line[1]) == 2, f"Invalid end point: {line[1]}"
+                
                 x1 = margin + (line[0][0] - start_epoch) * x_scale
                 y1 = height - margin - line[0][1] * y_scale
                 x2 = margin + (line[1][0] - start_epoch) * x_scale
                 y2 = height - margin - line[1][1] * y_scale
-                
                 # Only draw if both points are within bounds
                 if (margin <= x1 <= width - margin and margin <= y1 <= height - margin and
                     margin <= x2 <= width - margin and margin <= y2 <= height - margin):
-                    draw.line([(x1, y1), (x2, y2)], fill=(0, 100, 200, 100), width=1)
-            
-            # Clear chunk from memory
+                    if is_weighted and max_weight > 0:
+                        # Use matplotlib colormap for better perceptual uniformity
+                        rgba = colormap(norm(weight))
+                        # Convert numpy array to regular Python values
+                        rgb = tuple(int(255 * float(c)) for c in rgba[:3])  # Ignore alpha
+                    else:
+                        rgb = (0, 100, 200)  # No alpha
+                    draw.line([(x1, y1), (x2, y2)], fill=rgb, width=1)
             del chunk
             gc.collect()
     
@@ -357,26 +435,35 @@ def draw_frame_from_edges(window_lines, start_epoch, end_epoch, max_bin, frame_n
     if window_lines:
         # Collect unique points
         points = set()
-        for line in window_lines:
+        for item in window_lines:
+            # Handle both weighted (edge, weight) and unweighted edge formats
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int):
+                line = item[0]  # (edge, weight) format
+            else:
+                line = item     # edge format
             points.add(line[0])
             points.add(line[1])
+        
+        # (Optional) If weighted, you could compute node degree/weight here for point size/opacity
+        # node_weight = defaultdict(int)
+        # if is_weighted:
+        #     for (line, weight) in window_lines:
+        #         node_weight[line[0]] += weight
+        #         node_weight[line[1]] += weight
         
         # Draw points in chunks
         point_list = list(points)
         chunk_size = 5000
         for i in range(0, len(point_list), chunk_size):
             chunk = point_list[i:i+chunk_size]
-            
             for point in chunk:
                 x = margin + (point[0] - start_epoch) * x_scale
                 y = height - margin - point[1] * y_scale
-                
                 if margin <= x <= width - margin and margin <= y <= height - margin:
-                    draw.ellipse([x-1, y-1, x+1, y+1], fill=(0, 0, 0, 25))
-            
+                    # (Optional) Use node_weight[point] to scale size/opacity
+                    draw.ellipse([x-1, y-1, x+1, y+1], fill=(0, 0, 0))
             del chunk
             gc.collect()
-        
         del points, point_list
     
     # Draw title
@@ -388,15 +475,29 @@ def draw_frame_from_edges(window_lines, start_epoch, end_epoch, max_bin, frame_n
         except:
             font = ImageFont.load_default()
     
-    title = f"Lineage Evolution - Epochs {start_epoch} to {end_epoch} ({edge_count} edges)"
+    # Draw axis marks (X - Epoch)
+    for i in range(0, epoch_range + 1, max(1, epoch_range // 10)):
+        x = margin + i * x_scale
+        draw.line([(x, height - margin), (x, height - margin + 5)], fill='black', width=1)
+        label = str(start_epoch + i)
+        draw.text((x - 10, height - margin + 10), label, fill='black', font=font)
+    # Draw axis marks (Y - Bin)
+    for i in range(0, max_bin + 1, max(1, (max_bin + 1) // 10)):
+        y = height - margin - i * y_scale
+        draw.line([(margin - 5, y), (margin, y)], fill='black', width=1)
+        label = str(i)
+        draw.text((margin - 40, y - 8), label, fill='black', font=font)
+    title = f"Lineage Evolution - Epochs {start_epoch} to {end_epoch} ({edge_count} transitions)"
     draw.text((margin, 20), title, fill='black', font=font)
-    
     # Draw axis labels
     draw.text((width//2, height - 30), "Epoch", fill='black', font=font)
     draw.text((20, height//2), "Step Bin", fill='black', font=font, angle=90)
     
     # Save frame
-    frame_path = os.path.join(output_dir, f"frame_{frame_num:04d}.png")
+    # Use dynamic padding based on total_frames to support large frame counts
+    padding = len(str(total_frames)) if total_frames > 0 else 4
+    frame_filename = f"frame_{frame_num:0{padding}d}.png"
+    frame_path = os.path.join(output_dir, frame_filename)
     img.save(frame_path, 'PNG', optimize=True)
     
     # Explicitly delete objects to free memory
@@ -436,11 +537,11 @@ def create_frame_pil_compressed(save_path, bin_size, start_epoch, end_epoch, max
     return frame_path, edge_count, processed_rows
 
 def compress_edges_file_by_epoch(save_path, bin_size):
-    """Remove duplicate edges within each epoch and create a compressed version."""
+    """Remove duplicate edges within each epoch and create a compressed version using streaming approach."""
     input_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}.csv")
     output_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}_compressed.csv")
     
-    print(f"🗜️  Compressing edges file (by epoch)...")
+    print(f"🗜️  Compressing edges file (by epoch) - streaming approach...")
     print(f"   - Input: {input_path}")
     print(f"   - Output: {output_path}")
     
@@ -448,59 +549,94 @@ def compress_edges_file_by_epoch(save_path, bin_size):
     original_size = os.path.getsize(input_path)
     print(f"   - Original size: {original_size / (1024*1024):.1f} MB")
     
-    # Group edges by epoch
-    epoch_edges = defaultdict(lambda: defaultdict(int))
-    row_count = 0
+    # First pass: get epoch range and count total rows
+    print("   - Scanning file for epoch range...")
+    min_epoch = float('inf')
+    max_epoch = 0
+    total_rows = 0
     
-    print("   - Reading and grouping edges by epoch...")
-    with open(input_path, newline="") as f_in:
-        reader = csv.DictReader(f_in)
+    with open(input_path, newline="") as f:
+        reader = csv.DictReader(f)
         for row in reader:
-            row_count += 1
-            if row_count % 100000 == 0:
-                print(f"     - Processed {row_count:,} rows...")
-            
+            total_rows += 1
             try:
                 pe = int(row["parent_epoch"])
                 ce = int(row["child_epoch"])
-                pbins = [int(row["p1_bin"]), int(row["p2_bin"])]
-                cbins = [int(row["c1_bin"]), int(row["c2_bin"])]
-                
-                for pb in pbins:
-                    for cb in cbins:
-                        if pb >= 0 and cb >= 0:
-                            # Create a unique key for this edge within the epoch
-                            edge_key = (pe, pb, ce, cb)
-                            epoch_edges[pe][edge_key] += 1
+                min_epoch = min(min_epoch, pe, ce)
+                max_epoch = max(max_epoch, pe, ce)
             except Exception as e:
                 continue
     
-    # Count totals
-    total_original_edges = sum(sum(counts.values()) for counts in epoch_edges.values())
-    total_unique_edges = sum(len(counts) for counts in epoch_edges.values())
+    if min_epoch == float('inf'):
+        min_epoch = 0
     
-    print(f"   - Original rows: {row_count:,}")
-    print(f"   - Original edges: {total_original_edges:,}")
-    print(f"   - Unique edges (by epoch): {total_unique_edges:,}")
-    print(f"   - Compression ratio: {total_original_edges / total_unique_edges:.1f}x")
+    print(f"   - Epoch range: {min_epoch} to {max_epoch}")
+    print(f"   - Total rows: {total_rows:,}")
     
-    # Write compressed file
-    print("   - Writing compressed file...")
+    # Streaming compression: process one epoch at a time
     compressed_count = 0
+    total_original_edges = 0
+    total_unique_edges = 0
+    
     with open(output_path, 'w', newline="") as f_out:
         writer = csv.writer(f_out)
-        writer.writerow(["parent_epoch", "p1_bin", "p2_bin", "child_epoch", "c1_bin", "c2_bin", "count"])
+        writer.writerow(["parent_epoch", "p1_bin", "p2_bin", "child_epoch", "c1_bin", "c2_bin", "weight"])
         
-        # Sort by epoch for consistent output
-        for epoch in sorted(epoch_edges.keys()):
-            for edge_key in sorted(epoch_edges[epoch].keys()):
+        # Process each epoch separately to keep memory usage constant
+        for current_epoch in range(int(min_epoch), int(max_epoch) + 1):
+            epoch_edges = defaultdict(int)
+            epoch_processed = 0
+            
+            # Scan file for current epoch
+            with open(input_path, newline="") as f_in:
+                reader = csv.DictReader(f_in)
+                for row in reader:
+                    try:
+                        pe = int(row["parent_epoch"])
+                        ce = int(row["child_epoch"])
+                        
+                        # Only process edges involving current epoch
+                        if pe == current_epoch or ce == current_epoch:
+                            epoch_processed += 1
+                            pbins = [int(row["p1_bin"]), int(row["p2_bin"])]
+                            cbins = [int(row["c1_bin"]), int(row["c2_bin"])]
+                            
+                            for pb in pbins:
+                                for cb in cbins:
+                                    if pb >= 0 and cb >= 0:
+                                        edge_key = (pe, pb, ce, cb)
+                                        epoch_edges[edge_key] += 1
+                    except Exception as e:
+                        continue
+            
+            # Write compressed edges for this epoch
+            epoch_original = sum(epoch_edges.values())
+            epoch_unique = len(epoch_edges)
+            total_original_edges += epoch_original
+            total_unique_edges += epoch_unique
+            
+            for edge_key in sorted(epoch_edges.keys()):
                 pe, pb, ce, cb = edge_key
-                count = epoch_edges[epoch][edge_key]
+                count = epoch_edges[edge_key]
                 writer.writerow([pe, pb, pb, ce, cb, cb, count])
                 compressed_count += 1
+            
+            # Progress reporting
+            if current_epoch % 100 == 0 or current_epoch == max_epoch:
+                compression_ratio = epoch_original / epoch_unique if epoch_unique > 0 else 1
+                print(f"     - Epoch {current_epoch}: {epoch_original:,} → {epoch_unique:,} edges ({compression_ratio:.1f}x)")
+            
+            # Clear epoch data to free memory
+            del epoch_edges
+            gc.collect()
     
     # Get compressed file size
     compressed_size = os.path.getsize(output_path)
+    overall_compression_ratio = total_original_edges / total_unique_edges if total_unique_edges > 0 else 1
+    
+    print(f"   - Original edges: {total_original_edges:,}")
+    print(f"   - Unique edges (by epoch): {total_unique_edges:,}")
+    print(f"   - Overall compression ratio: {overall_compression_ratio:.1f}x")
     print(f"   - Compressed size: {compressed_size / (1024*1024):.1f} MB")
     print(f"   - Size reduction: {original_size / compressed_size:.1f}x")
     print(f"   - Compressed rows: {compressed_count:,}")
@@ -508,44 +644,42 @@ def compress_edges_file_by_epoch(save_path, bin_size):
     return output_path, total_unique_edges, compressed_count
 
 def load_edges_for_window_compressed(save_path, bin_size, start_epoch, end_epoch):
-    """Load edges from compressed file for a specific window."""
+    """Load edges from compressed file for a specific window, returning weights."""
     compressed_path = os.path.join(save_path, f"edges_steps_binned_{bin_size}_compressed.csv")
     
     if not os.path.exists(compressed_path):
         # Fall back to original file if compressed doesn't exist
         return load_edges_for_window_streaming(save_path, bin_size, start_epoch, end_epoch)
     
-    edge_coords = set()
+    from collections import defaultdict
+    edge_coords = defaultdict(int)
     processed_rows = 0
-    
     with open(compressed_path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             processed_rows += 1
-            
             try:
                 pe = int(row["parent_epoch"])
                 ce = int(row["child_epoch"])
-                
                 # Only process edges within our window
                 if start_epoch <= pe <= end_epoch and start_epoch <= ce <= end_epoch:
                     pb = int(row["p1_bin"])
                     cb = int(row["c1_bin"])
-                    count = int(row.get("count", 1))
+                    try:
+                        weight = int(row.get("weight", 1))
+                    except (ValueError, TypeError):
+                        # Skip malformed weight values
+                        continue
                     
                     if pb >= 0 and cb >= 0:
-                        # Add the edge multiple times based on count
-                        for _ in range(count):
-                            edge_coords.add(((pe, pb), (ce, cb)))
+                        edge_key = ((pe, pb), (ce, cb))
+                        edge_coords[edge_key] += weight
             except Exception as e:
                 continue
-    
-    lines = list(edge_coords)
+    lines = list(edge_coords.items())  # [(edge_tuple, weight)]
     edge_count = len(lines)
-    
     del edge_coords
     gc.collect()
-    
     return lines, edge_count, processed_rows
 
 def analyze_compression_potential(save_path, bin_size):
@@ -592,16 +726,48 @@ def analyze_compression_potential(save_path, bin_size):
     
     return total_edges, unique_total, unique_edges_by_epoch
 
-def create_lineage_animation(save_path, bin_size=25, window_size=32, fps=2, output_path=None):
+def generate_colormap_legend(save_path, max_weight, colormap_name='plasma'):
+    """Generate a colorbar legend for the edge frequency colormap."""
+    try:
+        import matplotlib.pyplot as plt
+        
+        # Try newer API first, fallback to older API
+        try:
+            colormap = cm.colormaps[colormap_name]
+        except AttributeError:
+            colormap = cm.get_cmap(colormap_name)
+        norm = mcolors.LogNorm(vmin=1, vmax=max_weight)
+        
+        plt.figure(figsize=(8, 1))
+        cb = plt.colorbar(cm.ScalarMappable(norm=norm, cmap=colormap), orientation='horizontal')
+        cb.set_label('Edge Frequency (log-scaled)', fontsize=12)
+        cb.ax.tick_params(labelsize=10)
+        
+        legend_path = os.path.join(save_path, 'edge_frequency_legend.png')
+        plt.savefig(legend_path, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close()
+        
+        print(f"✅ Colorbar legend saved to: {legend_path}")
+        return legend_path
+    except ImportError:
+        print("⚠️  matplotlib not available - skipping colorbar generation")
+        return None
+    except Exception as e:
+        print(f"⚠️  Error generating colorbar: {e}")
+        return None
+
+def create_lineage_animation(save_path, bin_size=25, window_size=32, fps=2, output_path=None, batch_size=512, auto_confirm=False):
     """
     Create an animated video of epoch lineage evolution with compression analysis first.
+    Uses batch processing for memory efficiency with large epoch ranges.
     """
     if output_path is None:
         output_path = os.path.join(save_path, "lineage_animation.mp4")
     
-    print(f"🎬 Creating lineage animation (with compression analysis)...")
+    print(f"🎬 Creating lineage animation (with compression analysis and batch processing)...")
     print(f"   - Window size: {window_size} epochs")
     print(f"   - FPS: {fps}")
+    print(f"   - Batch size: {batch_size} frames")
     print(f"   - Output: {output_path}")
     
     # STEP 1: Run compression analysis first
@@ -619,7 +785,7 @@ def create_lineage_animation(save_path, bin_size=25, window_size=32, fps=2, outp
     
     # Decide whether to use compressed approach based on compression ratio
     use_compressed = compression_ratio >= 2.0
-    
+
     if use_compressed:
         print(f"\n✅ Good compression ratio ({compression_ratio:.1f}x) - will use compressed file.")
         
@@ -633,10 +799,11 @@ def create_lineage_animation(save_path, bin_size=25, window_size=32, fps=2, outp
         print(f"   This suggests most edges are already unique within epochs.")
         print(f"   Will use indexed approach instead.")
         
-        proceed = input("\n❓ Do you want to proceed anyway? (y/n): ").strip().lower()
-        if proceed != 'y':
-            print("❌ Animation generation cancelled.")
-            return None
+        if not auto_confirm:
+            proceed = input("\n❓ Do you want to proceed anyway? (y/n): ").strip().lower()
+            if proceed != 'y':
+                print("❌ Animation generation cancelled.")
+                return None
     
     # STEP 2: Get data ranges
     print("\n" + "="*60)
@@ -674,62 +841,88 @@ def create_lineage_animation(save_path, bin_size=25, window_size=32, fps=2, outp
     print(f"   - Epoch range: {min_epoch} to {max_epoch}")
     print(f"   - Estimated duration: {total_frames / fps:.1f}s")
     print(f"   - Approach: {'Compressed' if use_compressed else 'Indexed'}")
-    print(f"   - Estimated total time: {total_frames * 15 / 60:.1f} minutes (assuming 15s per frame)")
+    print(f"   - Batch processing: {batch_size} frames per batch")
+    print(f"   - Number of batches: {(total_frames + batch_size - 1) // batch_size}")
     
     # Ask for confirmation before proceeding with frame generation
-    print(f"\n⚠️  Frame generation will take approximately {total_frames * 15 / 60:.1f} minutes.")
-    proceed = input("❓ Proceed with frame generation? (y/n): ").strip().lower()
-    if proceed != 'y':
-        print("❌ Frame generation cancelled.")
-        return None
+    print(f"\n⚠️  Frame generation will process {total_frames} frames in batches of {batch_size}.")
+    if not auto_confirm:
+        proceed = input("❓ Proceed with frame generation? (y/n): ").strip().lower()
+        if proceed != 'y':
+            print("❌ Frame generation cancelled.")
+            return None
     
-    # STEP 5: Generate frames (only if user confirms)
+    # STEP 5: Generate frames in batches
     print("\n" + "="*60)
-    print("STEP 4: FRAME GENERATION")
+    print("STEP 4: BATCH FRAME GENERATION")
     print("="*60)
     
     # Create temporary directory for frames
     with tempfile.TemporaryDirectory() as temp_dir:
         print(f"📁 Using temporary directory: {temp_dir}")
         
-        # Generate frames one by one
-        print("🎨 Generating frames...")
+        # Generate frames in batches
+        print("🎨 Generating frames in batches...")
         frame_start = time.time()
         frame_times = []
+        global_max_weight = 1  # Track max weight across all batches for legend
         
-        for frame in range(total_frames):
-            frame_gen_start = time.time()
-            start_epoch = frame
-            end_epoch = start_epoch + window_size
+        for batch_start in range(0, total_frames, batch_size):
+            batch_end = min(batch_start + batch_size, total_frames)
+            batch_num = batch_start // batch_size + 1
+            total_batches = (total_frames + batch_size - 1) // batch_size
             
-            if use_compressed:
-                frame_path, edge_count, processed_rows = create_frame_pil_compressed(
-                    save_path, bin_size, start_epoch, end_epoch, 
-                    max_bin, frame, total_frames, temp_dir
-                )
-            else:
-                frame_path, edge_count, processed_rows = create_frame_pil_indexed(
-                    save_path, bin_size, start_epoch, end_epoch, 
-                    max_bin, frame, total_frames, temp_dir, epoch_positions, total_rows
-                )
+            print(f"\n📦 Processing batch {batch_num}/{total_batches} (frames {batch_start+1}-{batch_end})")
+            batch_start_time = time.time()
             
-            frame_time = time.time() - frame_gen_start
-            frame_times.append(frame_time)
-            avg_frame_time = sum(frame_times) / len(frame_times)
-            remaining_frames = total_frames - frame - 1
-            eta = remaining_frames * avg_frame_time
+            for frame in range(batch_start, batch_end):
+                frame_gen_start = time.time()
+                start_epoch = frame
+                end_epoch = start_epoch + window_size
+                
+                if use_compressed:
+                    frame_path, edge_count, processed_rows = create_frame_pil_compressed(
+                        save_path, bin_size, start_epoch, end_epoch, 
+                        max_bin, frame, total_frames, temp_dir
+                    )
+                    # Track global max weight for accurate legend scaling
+                    if use_compressed:
+                        # Get max weight from this frame's data
+                        window_lines, _, _ = load_edges_for_window_compressed(save_path, bin_size, start_epoch, end_epoch)
+                        if window_lines:
+                            frame_max_weight = max(weight for _, weight in window_lines)
+                            global_max_weight = max(global_max_weight, frame_max_weight)
+                else:
+                    frame_path, edge_count, processed_rows = create_frame_pil_indexed(
+                        save_path, bin_size, start_epoch, end_epoch, 
+                        max_bin, frame, total_frames, temp_dir, epoch_positions, total_rows
+                    )
+                
+                frame_time = time.time() - frame_gen_start
+                frame_times.append(frame_time)
+                avg_frame_time = sum(frame_times) / len(frame_times)
+                remaining_frames = total_frames - frame - 1
+                eta = remaining_frames * avg_frame_time
+                
+                if (frame + 1) % 50 == 0 or frame == batch_start:
+                    print(f"   📹 Frame {frame + 1}/{total_frames} - Epochs {start_epoch}-{end_epoch} "
+                          f"({edge_count} edges, {processed_rows:,} rows processed) "
+                          f"- Frame time: {frame_time:.2f}s, ETA: {eta:.1f}s")
+                
+                # Force garbage collection every few frames
+                if frame % 10 == 0:
+                    gc.collect()
             
-            if (frame + 1) % 10 == 0 or frame == 0:
-                print(f"   📹 Frame {frame + 1}/{total_frames} - Epochs {start_epoch}-{end_epoch} "
-                      f"({edge_count} edges, {processed_rows:,} rows processed) "
-                      f"- Frame time: {frame_time:.2f}s, ETA: {eta:.1f}s")
+            batch_time = time.time() - batch_start_time
+            print(f"✅ Batch {batch_num} completed in {batch_time:.2f}s")
             
-            # Force garbage collection every few frames
-            if frame % 5 == 0:
-                gc.collect()
+            # Generate colorbar legend for first batch with accurate max weight
+            if batch_num == 1 and use_compressed:
+                print(f"🎨 Generating colorbar legend with max_weight={global_max_weight}...")
+                generate_colormap_legend(save_path, global_max_weight, colormap_name='plasma')
         
         frame_gen_time = time.time() - frame_start
-        print(f"⏱️  Frame generation completed in {frame_gen_time:.2f}s")
+        print(f"⏱️  All frame generation completed in {frame_gen_time:.2f}s")
         
         # Combine frames into video using ffmpeg
         print(f"🎬 Combining frames into video...")
@@ -778,6 +971,8 @@ def main():
     parser.add_argument("--bin-size", type=int, default=25, help="Bin size used for step binning")
     parser.add_argument("--window-size", type=int, default=32, help="Number of epochs to show in each frame")
     parser.add_argument("--fps", type=int, default=2, help="Frames per second for animation")
+    parser.add_argument("--batch-size", type=int, default=512, help="Number of frames to process per batch (for memory efficiency)")
+    parser.add_argument("--yes", action="store_true", help="Auto-confirm all prompts")
     parser.add_argument("--output", help="Output path for video file")
     
     args = parser.parse_args()
@@ -791,6 +986,8 @@ def main():
     print(f"   - Bin size: {args.bin_size}")
     print(f"   - Window size: {args.window_size}")
     print(f"   - FPS: {args.fps}")
+    print(f"   - Batch size: {args.batch_size}")
+    print(f"   - Auto-confirm: {args.yes}")
     
     total_start = time.time()
     
@@ -800,7 +997,9 @@ def main():
             bin_size=args.bin_size,
             window_size=args.window_size,
             fps=args.fps,
-            output_path=args.output
+            batch_size=args.batch_size,
+            output_path=args.output,
+            auto_confirm=args.yes
         )
         total_time = time.time() - total_start
         print(f"\n🎉 Animation complete!")
