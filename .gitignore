@@ -17,6 +17,7 @@ experimentlogs/
 *.gif
 *.png
 *.json
+*.mp4
 
 # Text files (be careful - you might want specific .txt files)
 *.txt
