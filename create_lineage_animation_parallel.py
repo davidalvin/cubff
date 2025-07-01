@@ -24,6 +24,8 @@ import pandas as pd
 import cv2
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+import boto3
+from boto3.s3.transfer import S3Transfer, TransferConfig
 
 PARQUET_PREFIX = "step_edges_binned_"
 PARQUET_SUFFIX = ".parquet"
@@ -173,6 +175,46 @@ def render_slice(args):
 
 # ───────────────── orchestrator ─────────────────
 
+def is_s3_path(path: str) -> bool:
+    return path.startswith("s3://")
+
+def parse_s3_path(s3_path: str):
+    # Returns (bucket, prefix)
+    assert s3_path.startswith("s3://")
+    path = s3_path[5:]
+    parts = path.split("/", 1)
+    bucket = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    return bucket, prefix
+
+def download_step_edges_binned_from_s3(s3_path: str, epochs: list[int], local_dir: str):
+    bucket, prefix = parse_s3_path(s3_path)
+    s3 = boto3.client("s3")
+    transfer = S3Transfer(s3, config=TransferConfig(max_concurrency=8))
+    os.makedirs(local_dir, exist_ok=True)
+    # List all files in the prefix
+    paginator = s3.get_paginator("list_objects_v2")
+    files_needed = {f"step_edges_binned_{epoch:05d}.parquet" for epoch in epochs}
+    # Check which files already exist locally
+    local_files = set(os.listdir(local_dir))
+    files_to_download = files_needed - local_files
+    found_files = set(local_files) & files_needed
+    if files_to_download:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                fname = os.path.basename(obj["Key"])
+                if fname in files_to_download:
+                    dest_path = os.path.join(local_dir, fname)
+                    print(f"⏬ Downloading {fname} from s3://{bucket}/{obj['Key']} ...")
+                    transfer.download_file(bucket, obj["Key"], dest_path)
+                    found_files.add(fname)
+    missing = files_needed - found_files
+    if missing:
+        raise FileNotFoundError(f"Missing files in S3 or local: {missing}")
+    print(f"✅ All {len(files_needed)} step_edges_binned parquet files are present in {local_dir} (downloaded {len(files_to_download)} new files).")
+
 def animate(dir_path: str, window=32, fps=2,
             start_ep: int|None=None, end_ep: int|None=None,
             workers: int|None=None, output: str|None=None):
@@ -180,9 +222,38 @@ def animate(dir_path: str, window=32, fps=2,
     print(f"📁 Data path: {dir_path}")
     print(f"⚙️  Configuration: window_size={window}, fps={fps}")
     
+    # S3 support: if dir_path is S3, download required files to ./tmp_postprocess
+    if is_s3_path(dir_path):
+        print("☁️  S3 path detected. Downloading required Parquet files to ./tmp_postprocess ...")
+        # List epochs in S3 by scanning the prefix
+        bucket, prefix = parse_s3_path(dir_path)
+        s3 = boto3.client("s3")
+        paginator = s3.get_paginator("list_objects_v2")
+        epochs = set()
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                fname = os.path.basename(obj["Key"])
+                if fname.startswith(PARQUET_PREFIX) and fname.endswith(PARQUET_SUFFIX):
+                    try:
+                        ep = int(fname[len(PARQUET_PREFIX):-len(PARQUET_SUFFIX)])
+                        epochs.add(ep)
+                    except Exception:
+                        pass
+        if not epochs:
+            raise FileNotFoundError("No step_edges_binned_<epoch>.parquet files found in S3.")
+        min_ep, max_ep = min(epochs), max(epochs)
+        if start_ep is not None: min_ep = max(min_ep, start_ep)
+        if end_ep   is not None: max_ep = min(max_ep, end_ep)
+        if min_ep>max_ep: raise ValueError("Empty epoch range")
+        selected_epochs = list(range(min_ep, max_ep+1))
+        local_dir = './tmp_postprocess'
+        os.makedirs(local_dir, exist_ok=True)
+        download_step_edges_binned_from_s3(dir_path, selected_epochs, local_dir)
+        dir_path = local_dir
+
     if output is None:
         output = os.path.join(dir_path, "lineage_animation.mp4")
-    print(f"🎬 Output: {output}")
+    print(f"�� Output: {output}")
 
     print("🔍 Scanning epochs...")
     epochs = list_parquet_epochs(dir_path)
@@ -249,8 +320,8 @@ def animate(dir_path: str, window=32, fps=2,
 # ───────────────── CLI ─────────────────
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Parallel lineage animation with axis labels")
-    p.add_argument("data_path")
+    p = argparse.ArgumentParser(description="Parallel lineage animation with axis labels and S3 support")
+    p.add_argument("data_path", help="Path to local directory or s3://bucket/prefix containing step_edges_binned_<epoch>.parquet files")
     p.add_argument("--window-size", type=int, default=32)
     p.add_argument("--fps", type=int, default=2)
     p.add_argument("--start-epoch", type=int)
