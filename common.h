@@ -69,6 +69,7 @@ struct SimulationParams {
   bool zero_init = false;
   bool eval_selfrep = false;
   std::vector<std::vector<uint32_t>> allowed_interactions;
+  uint64_t callback_ops_interval = 1ULL << 20;
 };
 
 struct SimulationState {
@@ -91,6 +92,7 @@ struct SimulationState {
   std::vector<size_t> steps_per_prog;
   std::vector<unsigned long long> total_steps_per_prog;
   size_t steps_epoch_count;
+  size_t slice_id;
 };
 
 struct LanguageInterface {

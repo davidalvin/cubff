@@ -4,6 +4,7 @@ import boto3
 import shutil
 import glob
 import json
+import argparse
 from bin import cubff
 from bff_grammar_package.grammar_core.io import save_run_metadata
 from histogram_tracker import HistogramTracker
@@ -26,13 +27,22 @@ from db_qc import (
     validate_step_trace_interactive,
 )
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--enable_async", action="store_true")
+parser.add_argument("--ops_interval", type=int, default=1_000_000)
+args = parser.parse_args()
+ENABLE_ASYNC = args.enable_async
+OPS_INTERVAL = args.ops_interval
+if ENABLE_ASYNC and not getattr(cubff, "HAVE_ASYNC", False):
+    raise RuntimeError("cubff not built with async support")
+
 # === CONFIGURATION ===
-SAVE_TO_S3 = True
+SAVE_TO_S3 = False  # Changed to False for local testing
 RUN_NAME = "db_run_test"
 SAVE_PATH = f"./runs/{RUN_NAME}"
 S3_BUCKET = "bff-grammar"
 S3_PREFIX = f"soup/{RUN_NAME}/"
-s3 = boto3.client("s3")
+s3 = boto3.client("s3") if SAVE_TO_S3 else None
 
 # === PARAMETERS ===
 NUM_PROGRAMS = 128*1024
@@ -74,7 +84,7 @@ if not SAVE_TO_S3:
 
 
 def save_and_upload_csv(fn, *args, s3_key=None, **kwargs):
-    if SAVE_TO_S3:
+    if SAVE_TO_S3 and s3:
         with tempfile.TemporaryDirectory() as tmpdir:
             fn(*args, save_path=tmpdir, **kwargs)
             written_file = next((f for f in os.listdir(tmpdir) if f.endswith(".csv")), None)
@@ -87,13 +97,17 @@ def save_and_upload_csv(fn, *args, s3_key=None, **kwargs):
         fn(*args, save_path=SAVE_PATH, **kwargs)
 
 def callback(state):
-    if state.epoch % LOG_EVERY == 0 or state.epoch == MAX_EPOCHS:
-        print(f"ᾞc Epoch {state.epoch} | Brotli size: {state.brotli_size}")
-
-    dat_filename = f"soup_epoch_{state.epoch:05d}.dat"
+    if ENABLE_ASYNC:
+        if state.slice_id % LOG_EVERY == 0:
+            print(f"ᾞc Slice {state.slice_id} | Total ops: {state.total_ops}")
+        dat_filename = f"soup_slice_{state.slice_id:06d}.dat"
+    else:
+        if state.epoch % LOG_EVERY == 0 or state.epoch == MAX_EPOCHS:
+            print(f"ᾞc Epoch {state.epoch} | Brotli size: {state.brotli_size}")
+        dat_filename = f"soup_epoch_{state.epoch:05d}.dat"
     dat_path = os.path.join(params.save_to, dat_filename)
 
-    if SAVE_TO_S3:
+    if SAVE_TO_S3 and s3:
         with open(dat_path, "wb") as f:
             f.write(state.soup)
         s3.upload_file(dat_path, S3_BUCKET, os.path.join(S3_PREFIX, dat_filename))
@@ -151,16 +165,22 @@ def callback(state):
             "MAX_EPOCHS": MAX_EPOCHS,
             "BIN_WIDTH": BIN_WIDTH
         }
-        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
-            json.dump(metadata, tmp, indent=2)
-            tmp.flush()
-            s3.upload_file(tmp.name, S3_BUCKET, os.path.join(S3_PREFIX, "run_metadata.json"))
-        os.remove(tmp.name)
+        if SAVE_TO_S3 and s3:
+            with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+                json.dump(metadata, tmp, indent=2)
+                tmp.flush()
+                s3.upload_file(tmp.name, S3_BUCKET, os.path.join(S3_PREFIX, "run_metadata.json"))
+            os.remove(tmp.name)
+        else:
+            with open(os.path.join(SAVE_PATH, "run_metadata.json"), "w") as f:
+                json.dump(metadata, f, indent=2)
         print("📄 Saved run metadata.")
         return True
     return False
 
 def download_simulation_outputs(prefix, local_dir):
+    if not SAVE_TO_S3 or not s3:
+        return
     print("⏬ Downloading outputs from S3...")
     response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
     for obj in response.get("Contents", []):
@@ -196,6 +216,8 @@ params.permute_programs = PERMUTE_PROGRAMS
 params.fixed_shuffle = FIXED_SHUFFLE
 params.callback_interval = CALLBACK_INTERVAL
 params.save_interval = SAVE_INTERVAL
+if ENABLE_ASYNC:
+    params.callback_ops_interval = OPS_INTERVAL
 
 
 output_dir = tempfile.mkdtemp(prefix="cubff_tmp_") if SAVE_TO_S3 else SAVE_PATH
@@ -220,12 +242,13 @@ if SAVE_TO_S3:
     print("🧩 Writing Gephi node labels...")
     write_gephi_nodes_from_bins(output_dir, bin_size=BIN_WIDTH)
 
-    for fname in os.listdir(output_dir):
-        local_path = os.path.join(output_dir, fname)
-        if os.path.isfile(local_path) and fname.endswith(".csv"):
-            s3_key = os.path.join(S3_PREFIX, fname)
-            s3.upload_file(local_path, S3_BUCKET, s3_key)
-            print(f"📤 Uploaded {fname} → s3://{S3_BUCKET}/{s3_key}")
+    if SAVE_TO_S3 and s3:
+        for fname in os.listdir(output_dir):
+            local_path = os.path.join(output_dir, fname)
+            if os.path.isfile(local_path) and fname.endswith(".csv"):
+                s3_key = os.path.join(S3_PREFIX, fname)
+                s3.upload_file(local_path, S3_BUCKET, s3_key)
+                print(f"📤 Uploaded {fname} → s3://{S3_BUCKET}/{s3_key}")
 
     shutil.rmtree(output_dir, ignore_errors=True)
     print(f"🧹 Cleaned up temp directory: {output_dir}")
