@@ -37,12 +37,12 @@ if ENABLE_ASYNC and not getattr(cubff, "HAVE_ASYNC", False):
     raise RuntimeError("cubff not built with async support")
 
 # === CONFIGURATION ===
-SAVE_TO_S3 = True
+SAVE_TO_S3 = False  # Changed to False for local testing
 RUN_NAME = "db_run_test"
 SAVE_PATH = f"./runs/{RUN_NAME}"
 S3_BUCKET = "bff-grammar"
 S3_PREFIX = f"soup/{RUN_NAME}/"
-s3 = boto3.client("s3")
+s3 = boto3.client("s3") if SAVE_TO_S3 else None
 
 # === PARAMETERS ===
 NUM_PROGRAMS = 128*1024
@@ -84,7 +84,7 @@ if not SAVE_TO_S3:
 
 
 def save_and_upload_csv(fn, *args, s3_key=None, **kwargs):
-    if SAVE_TO_S3:
+    if SAVE_TO_S3 and s3:
         with tempfile.TemporaryDirectory() as tmpdir:
             fn(*args, save_path=tmpdir, **kwargs)
             written_file = next((f for f in os.listdir(tmpdir) if f.endswith(".csv")), None)
@@ -107,7 +107,7 @@ def callback(state):
         dat_filename = f"soup_epoch_{state.epoch:05d}.dat"
     dat_path = os.path.join(params.save_to, dat_filename)
 
-    if SAVE_TO_S3:
+    if SAVE_TO_S3 and s3:
         with open(dat_path, "wb") as f:
             f.write(state.soup)
         s3.upload_file(dat_path, S3_BUCKET, os.path.join(S3_PREFIX, dat_filename))
@@ -165,16 +165,22 @@ def callback(state):
             "MAX_EPOCHS": MAX_EPOCHS,
             "BIN_WIDTH": BIN_WIDTH
         }
-        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
-            json.dump(metadata, tmp, indent=2)
-            tmp.flush()
-            s3.upload_file(tmp.name, S3_BUCKET, os.path.join(S3_PREFIX, "run_metadata.json"))
-        os.remove(tmp.name)
+        if SAVE_TO_S3 and s3:
+            with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+                json.dump(metadata, tmp, indent=2)
+                tmp.flush()
+                s3.upload_file(tmp.name, S3_BUCKET, os.path.join(S3_PREFIX, "run_metadata.json"))
+            os.remove(tmp.name)
+        else:
+            with open(os.path.join(SAVE_PATH, "run_metadata.json"), "w") as f:
+                json.dump(metadata, f, indent=2)
         print("📄 Saved run metadata.")
         return True
     return False
 
 def download_simulation_outputs(prefix, local_dir):
+    if not SAVE_TO_S3 or not s3:
+        return
     print("⏬ Downloading outputs from S3...")
     response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
     for obj in response.get("Contents", []):
@@ -236,12 +242,13 @@ if SAVE_TO_S3:
     print("🧩 Writing Gephi node labels...")
     write_gephi_nodes_from_bins(output_dir, bin_size=BIN_WIDTH)
 
-    for fname in os.listdir(output_dir):
-        local_path = os.path.join(output_dir, fname)
-        if os.path.isfile(local_path) and fname.endswith(".csv"):
-            s3_key = os.path.join(S3_PREFIX, fname)
-            s3.upload_file(local_path, S3_BUCKET, s3_key)
-            print(f"📤 Uploaded {fname} → s3://{S3_BUCKET}/{s3_key}")
+    if SAVE_TO_S3 and s3:
+        for fname in os.listdir(output_dir):
+            local_path = os.path.join(output_dir, fname)
+            if os.path.isfile(local_path) and fname.endswith(".csv"):
+                s3_key = os.path.join(S3_PREFIX, fname)
+                s3.upload_file(local_path, S3_BUCKET, s3_key)
+                print(f"📤 Uploaded {fname} → s3://{S3_BUCKET}/{s3_key}")
 
     shutil.rmtree(output_dir, ignore_errors=True)
     print(f"🧹 Cleaned up temp directory: {output_dir}")

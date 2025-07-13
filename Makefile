@@ -8,7 +8,7 @@ endif
 
 PYTHON := 0
 
-COMMON_FLAGS := -g -std=c++17 -O3 \
+COMMON_FLAGS := -g -std=c++17 -O3 -DENABLE_ASYNC \
 	$(shell pkg-config --cflags libbrotlienc libbrotlicommon) \
 	${EXTRA_LDFLAGS}
 
@@ -35,9 +35,9 @@ else
 	LANGS := $(filter-out build/cubff_py.o, $(patsubst %.cc,build/%.o,$(wildcard *.cc)))
 endif
 
-PYEXT := $(shell python3.11-config --extension-suffix)
-PYBIND11_INCLUDE := $(shell python3.11 -m pybind11 --includes)
-PYTHON_LDFLAGS := $(shell python3.11-config --ldflags)
+PYEXT := $(shell python3-config --extension-suffix)
+PYBIND11_INCLUDE := $(shell python3 -m pybind11 --includes)
+PYTHON_LDFLAGS := $(shell python3-config --ldflags)
 
 ifeq (${PYTHON}, 0)
 .PHONY: all

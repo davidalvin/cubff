@@ -47,6 +47,7 @@ PYBIND11_MODULE(cubff, m) {
       .def_readwrite("allowed_interactions",
                      &SimulationParams::allowed_interactions)
       .def_readwrite("eval_selfrep", &SimulationParams::eval_selfrep)
+      .def_readwrite("callback_ops_interval", &SimulationParams::callback_ops_interval)
       .def(pybind11::init<>());
 
   py::bind_vector<std::vector<uint8_t>>(m, "VectorUint8",
