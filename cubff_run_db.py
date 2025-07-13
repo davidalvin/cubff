@@ -4,6 +4,7 @@ import boto3
 import shutil
 import glob
 import json
+import argparse
 from bin import cubff
 from bff_grammar_package.grammar_core.io import save_run_metadata
 from histogram_tracker import HistogramTracker
@@ -25,6 +26,15 @@ from db_qc import (
     trace_tape_interactive,
     validate_step_trace_interactive,
 )
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--enable_async", action="store_true")
+parser.add_argument("--ops_interval", type=int, default=1_000_000)
+args = parser.parse_args()
+ENABLE_ASYNC = args.enable_async
+OPS_INTERVAL = args.ops_interval
+if ENABLE_ASYNC and not getattr(cubff, "HAVE_ASYNC", False):
+    raise RuntimeError("cubff not built with async support")
 
 # === CONFIGURATION ===
 SAVE_TO_S3 = True
@@ -87,10 +97,14 @@ def save_and_upload_csv(fn, *args, s3_key=None, **kwargs):
         fn(*args, save_path=SAVE_PATH, **kwargs)
 
 def callback(state):
-    if state.epoch % LOG_EVERY == 0 or state.epoch == MAX_EPOCHS:
-        print(f"ᾞc Epoch {state.epoch} | Brotli size: {state.brotli_size}")
-
-    dat_filename = f"soup_epoch_{state.epoch:05d}.dat"
+    if ENABLE_ASYNC:
+        if state.slice_id % LOG_EVERY == 0:
+            print(f"ᾞc Slice {state.slice_id} | Total ops: {state.total_ops}")
+        dat_filename = f"soup_slice_{state.slice_id:06d}.dat"
+    else:
+        if state.epoch % LOG_EVERY == 0 or state.epoch == MAX_EPOCHS:
+            print(f"ᾞc Epoch {state.epoch} | Brotli size: {state.brotli_size}")
+        dat_filename = f"soup_epoch_{state.epoch:05d}.dat"
     dat_path = os.path.join(params.save_to, dat_filename)
 
     if SAVE_TO_S3:
@@ -196,6 +210,8 @@ params.permute_programs = PERMUTE_PROGRAMS
 params.fixed_shuffle = FIXED_SHUFFLE
 params.callback_interval = CALLBACK_INTERVAL
 params.save_interval = SAVE_INTERVAL
+if ENABLE_ASYNC:
+    params.callback_ops_interval = OPS_INTERVAL
 
 
 output_dir = tempfile.mkdtemp(prefix="cubff_tmp_") if SAVE_TO_S3 else SAVE_PATH

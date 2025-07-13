@@ -19,7 +19,7 @@ ifeq (${CUDA}, 1)
 	FLAGS := ${COMMON_FLAGS} -arch sm_75 --compiler-options -Wall,-fPIC \
 		--compiler-bindir $(shell which ${CXX}) \
 		-I ${CUDA_PATH}/include -L ${CUDA_PATH}/lib
-	COMPILE_FLAGS := ${FLAGS}
+        COMPILE_FLAGS := ${FLAGS} ${EXTRA_CXXFLAGS}
 	COMPILER := nvcc
 	LANGS := $(patsubst %.cu,build/%.o,$(wildcard *.cu))
 else
@@ -30,7 +30,7 @@ else
 	else
 		FLAGS += -fopenmp
 	endif
-	COMPILE_FLAGS := ${FLAGS} -xc++
+        COMPILE_FLAGS := ${FLAGS} ${EXTRA_CXXFLAGS} -xc++
 	COMPILER := ${CXX}
 	LANGS := $(filter-out build/cubff_py.o, $(patsubst %.cc,build/%.o,$(wildcard *.cc)))
 endif

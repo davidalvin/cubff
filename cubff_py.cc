@@ -74,7 +74,8 @@ PYBIND11_MODULE(cubff, m) {
       .def_readonly("steps_per_prog", &SimulationState::steps_per_prog)
       .def_readonly("total_steps_per_prog",
                     &SimulationState::total_steps_per_prog)
-      .def_readonly("steps_epoch_count", &SimulationState::steps_epoch_count);
+      .def_readonly("steps_epoch_count", &SimulationState::steps_epoch_count)
+      .def_readonly("slice_id", &SimulationState::slice_id);
 
   pybind11::class_<LanguageInterface>(m, "LanguageInterface")
       .def("PrintProgram",
@@ -97,4 +98,9 @@ PYBIND11_MODULE(cubff, m) {
     fflush(stdout);
   });
   m.attr("kSelfrepThreshold") = kSelfrepThreshold;
+#ifdef ENABLE_ASYNC
+  m.attr("HAVE_ASYNC") = true;
+#else
+  m.attr("HAVE_ASYNC") = false;
+#endif
 }

@@ -86,6 +86,18 @@ struct DeviceMemory {
 #define __host__
 #define __global__
 
+#include <omp.h>
+#include <thread>
+
+inline uint32_t atomicAdd(uint32_t* addr, uint32_t val) {
+  return __atomic_fetch_add(addr, val, __ATOMIC_RELAXED);
+}
+
+static int init_omp_threads = []() {
+  omp_set_num_threads(std::thread::hardware_concurrency());
+  return 0;
+}();
+
 inline size_t &IndexThreadLocal() {
   thread_local size_t index;
   return index;
@@ -136,6 +148,36 @@ inline __device__ __host__ uint64_t SplitMix64(uint64_t seed) {
 }
 
 template <typename Language>
+__device__ void MutateAndRunPair(uint32_t p1, uint32_t p2, uint8_t* programs,
+                                 uint64_t seed, uint32_t mutation_prob,
+                                 size_t* steps_out,
+                                 unsigned long long* insn_counter) {
+  uint8_t tape[2 * kSingleTapeSize];
+
+  for (int i = 0; i < kSingleTapeSize; ++i) {
+    tape[i] = programs[p1 * kSingleTapeSize + i];
+    tape[i + kSingleTapeSize] = programs[p2 * kSingleTapeSize + i];
+  }
+
+  for (int i = 0; i < 2 * kSingleTapeSize; ++i) {
+    uint64_t rng = SplitMix64(seed * 2 * kSingleTapeSize + i);
+    uint8_t repl = rng & 0xFF;
+    if (((rng >> 8) & ((1ULL << 30) - 1)) < mutation_prob) tape[i] = repl;
+  }
+
+  size_t ops = Language::Evaluate(tape, 8 * 1024, false);
+
+  for (int i = 0; i < kSingleTapeSize; ++i) {
+    programs[p1 * kSingleTapeSize + i] = tape[i];
+    programs[p2 * kSingleTapeSize + i] = tape[i + kSingleTapeSize];
+  }
+
+  steps_out[p1] = ops;
+  steps_out[p2] = ops;
+  IncreaseInsnCount(ops, insn_counter);
+}
+
+template <typename Language>
 __global__ void InitPrograms(size_t seed, size_t num_programs,
                              uint8_t *programs, bool zero_init) {
   size_t index = GetIndex();
@@ -162,38 +204,52 @@ __global__ void MutateAndRunPrograms(uint8_t *programs,
                                      size_t *steps_out, size_t num_programs,
                                      size_t num_indices) {
   size_t index = GetIndex();
-  uint8_t tape[2 * kSingleTapeSize] = {};
   if (2 * index >= num_programs) return;
   uint32_t p1 = shuf_idx[2 * index];
   uint32_t p2 = shuf_idx[2 * index + 1];
-  for (size_t i = 0; i < kSingleTapeSize; i++) {
-    tape[i] = programs[p1 * kSingleTapeSize + i];
-    tape[i + kSingleTapeSize] = programs[p2 * kSingleTapeSize + i];
-  }
-  for (size_t i = 0; i < 2 * kSingleTapeSize; i++) {
-    uint64_t rng =
-        SplitMix64((num_programs * seed + index) * kSingleTapeSize * 2 + i);
-    uint8_t repl = rng & 0xFF;
-    uint64_t prob_rng = (rng >> 8) & ((1ULL << 30) - 1);
-    if (prob_rng < mutation_prob) {
-      tape[i] = repl;
-    }
-  }
-  bool debug = false;
-  size_t ops;
+
   if (index < num_indices) {
-    ops = Language::Evaluate(tape, 8 * 1024, debug);
+    uint64_t pair_seed = (uint64_t)num_programs * seed + index;
+    MutateAndRunPair<Language>(p1, p2, programs, pair_seed, mutation_prob,
+                               steps_out, insn_count);
   } else {
-    ops = 0;
+    // still mutate without evaluation
+    uint8_t tape[2 * kSingleTapeSize];
+    for (size_t i = 0; i < kSingleTapeSize; i++) {
+      tape[i] = programs[p1 * kSingleTapeSize + i];
+      tape[i + kSingleTapeSize] = programs[p2 * kSingleTapeSize + i];
+    }
+    for (size_t i = 0; i < 2 * kSingleTapeSize; i++) {
+      uint64_t rng =
+          SplitMix64(((uint64_t)num_programs * seed + index) *
+                     kSingleTapeSize * 2 + i);
+      uint8_t repl = rng & 0xFF;
+      if (((rng >> 8) & ((1ULL << 30) - 1)) < mutation_prob) tape[i] = repl;
+    }
+    for (size_t i = 0; i < kSingleTapeSize; i++) {
+      programs[p1 * kSingleTapeSize + i] = tape[i];
+      programs[p2 * kSingleTapeSize + i] = tape[i + kSingleTapeSize];
+    }
+    steps_out[p1] = 0;
+    steps_out[p2] = 0;
   }
-  for (size_t i = 0; i < kSingleTapeSize; i++) {
-    programs[p1 * kSingleTapeSize + i] = tape[i];
-    programs[p2 * kSingleTapeSize + i] = tape[i + kSingleTapeSize];
-  }
-  steps_out[p1] = ops;
-  steps_out[p2] = ops;
-  IncreaseInsnCount(ops, insn_count);
 }
+
+#ifdef ENABLE_ASYNC
+template <typename Language>
+__global__ void RunAsyncPairs(uint8_t* programs, size_t num_prog,
+                              uint32_t* head, uint64_t seed,
+                              uint32_t mutation_prob, size_t* steps_out,
+                              unsigned long long* insn_counter) {
+  while (true) {
+    uint32_t idx = atomicAdd(head, 2u);
+    if (idx + 1 >= num_prog) break;
+    MutateAndRunPair<Language>(idx, idx + 1, programs,
+                               seed ^ ((uint64_t)idx << 32), mutation_prob,
+                               steps_out, insn_counter);
+  }
+}
+#endif
 
 template <typename Language>
 __global__ void RunOneProgram(uint8_t *program, size_t stepcount, bool debug) {
@@ -365,6 +421,7 @@ void Simulation<Language>::RunSimulation(
   DeviceMemory<uint8_t> programs(kSingleTapeSize * num_programs);
   DeviceMemory<unsigned long long> insn_count(1);
   DeviceMemory<size_t> program_steps(num_programs);
+  DeviceMemory<uint32_t> work_head(1);
 
   CHECK(num_programs % 2 == 0);
 
@@ -385,6 +442,9 @@ void Simulation<Language>::RunSimulation(
   insn_count.Write(&zero, 1);
 
   unsigned long long total_ops = 0;
+#ifdef ENABLE_ASYNC
+  uint64_t next_cb_at = params.callback_ops_interval;
+#endif
 
   SimulationState state;
   state.soup.reserve(num_programs * kSingleTapeSize + 16);
@@ -393,6 +453,7 @@ void Simulation<Language>::RunSimulation(
   state.steps_per_prog.resize(num_programs);
   state.total_steps_per_prog.assign(num_programs, 0);
   state.steps_epoch_count = 0;
+  state.slice_id = 0;
   state.shuffle_idx.resize(num_programs);
   Language::InitByteColors(state.byte_colors);
 
@@ -493,13 +554,42 @@ void Simulation<Language>::RunSimulation(
     }
 
     shuf_idx.Write(s.data(), num_programs);
+#ifdef ENABLE_ASYNC
+    uint32_t zero32 = 0;
+    work_head.Write(&zero32, 1);
+#endif
 
     RUN((num_programs + 2 * kNumThreads - 1) / (2 * kNumThreads), kNumThreads,
+#ifdef ENABLE_ASYNC
+        RunAsyncPairs<Language>, programs.Get(), num_programs, work_head.Get(),
+        seed(epoch), params.mutation_prob, program_steps.Get(),
+        insn_count.Get());
+    num_runs += num_programs / 2;
+#else
         MutateAndRunPrograms<Language>, programs.Get(), shuf_idx.Get(),
         seed(epoch), params.mutation_prob, insn_count.Get(),
         program_steps.Get(), num_programs, num_indices);
     num_runs += num_indices;
+#endif
 
+#ifdef ENABLE_ASYNC
+    auto stop = std::chrono::high_resolution_clock::now();
+#ifndef __CUDACC__
+    #pragma omp barrier
+#endif
+    Synchronize();
+    unsigned long long insn;
+    insn_count.Read(&insn, 1);
+    total_ops += insn;
+    if (total_ops >= next_cb_at) {
+      program_steps.Read(state.steps_per_prog.data(), num_programs);
+      for (size_t i = 0; i < num_programs; ++i) {
+        state.total_steps_per_prog[i] += state.steps_per_prog[i];
+      }
+      state.steps_epoch_count++;
+      programs.Read(state.soup.data(), num_programs * kSingleTapeSize);
+      Synchronize();
+#else
     if (epoch % params.callback_interval == 0) {
       auto stop = std::chrono::high_resolution_clock::now();
       Synchronize();
@@ -513,6 +603,7 @@ void Simulation<Language>::RunSimulation(
       state.steps_epoch_count++;
       programs.Read(state.soup.data(), num_programs * kSingleTapeSize);
       Synchronize();
+#endif
       size_t brotli_size = brotlified_data.size();
       BrotliEncoderCompress(2, 24, BROTLI_MODE_GENERIC, state.soup.size(),
                             state.soup.data(), &brotli_size,
@@ -549,7 +640,12 @@ void Simulation<Language>::RunSimulation(
       state.elapsed_s = sim_elapsed_s;
       state.total_ops = total_ops;
       state.mops_s = mops_s;
+#ifdef ENABLE_ASYNC
       state.epoch = epoch + 1;
+      state.slice_id = total_ops / params.callback_ops_interval;
+#else
+      state.epoch = epoch + 1;
+#endif
       state.ops_per_run = insn * 1.0 / num_runs;
       state.brotli_size = brotli_size;
       state.brotli_bpb = brotli_bpb;
@@ -581,8 +677,13 @@ void Simulation<Language>::RunSimulation(
       }
       if (params.save_to.has_value() && (epoch % params.save_interval == 0)) {
         std::vector<char> save_path(params.save_to->size() + 20);
+#ifdef ENABLE_ASYNC
+        snprintf(save_path.data(), save_path.size(), "%s/soup_slice_%06zu.dat",
+                 params.save_to->c_str(), state.slice_id);
+#else
         snprintf(save_path.data(), save_path.size(), "%s/%010zu.dat",
                  params.save_to->c_str(), epoch);
+#endif
         FILE *f = CheckFopen(save_path.data(), "w");
         size_t epoch_to_save = epoch + 1;
         fwrite(&reset_index, sizeof(reset_index), 1, f);
@@ -600,6 +701,9 @@ void Simulation<Language>::RunSimulation(
       num_runs = 0;
       start = std::chrono::high_resolution_clock::now();
       insn_count.Write(&zero, 1);
+#ifdef ENABLE_ASYNC
+      next_cb_at += params.callback_ops_interval;
+#endif
     }
 
     if (params.reset_interval.has_value() &&
