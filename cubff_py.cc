@@ -57,6 +57,18 @@ PYBIND11_MODULE(cubff, m) {
   pybind11::class_<SimulationState>(m, "SimulationState")
       .def_readonly("soup", &SimulationState::soup)
       .def_readonly("shuffle_idx", &SimulationState::shuffle_idx)
+      .def_property_readonly(
+          "byte_colors",
+          [](const SimulationState& s) {
+            std::vector<char> flat;
+            flat.reserve(256 * 3);
+            for (const auto& c : s.byte_colors) {
+              flat.push_back(static_cast<char>(c[0]));
+              flat.push_back(static_cast<char>(c[1]));
+              flat.push_back(static_cast<char>(c[2]));
+            }
+            return py::bytes(flat.data(), flat.size());
+          })
       .def_readonly("elapsed_s", &SimulationState::elapsed_s)
       .def_readonly("total_ops", &SimulationState::total_ops)
       .def_readonly("mops_s", &SimulationState::mops_s)
