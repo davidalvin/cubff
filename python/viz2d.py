@@ -77,15 +77,26 @@ def main():
         default=0,
         help="Mutation probability numerator over 2^30 (default: library default)",
     )
+    parser.add_argument(
+        "--display-num",
+        type=int,
+        default=0,
+        help="Number of programs to display (default: same as --num)",
+    )
     args = parser.parse_args()
 
     num_programs = args.num
-    grid_cols = args.grid_width if args.grid_width > 0 else int(math.isqrt(num_programs))
-    grid_rows = num_programs // grid_cols
-    if grid_rows * grid_cols != num_programs:
+    display_num = args.display_num if args.display_num > 0 else num_programs
+    if display_num > num_programs:
+        print(f"Error: --display-num {display_num} cannot exceed --num {num_programs}")
+        sys.exit(1)
+
+    grid_cols = args.grid_width if args.grid_width > 0 else int(math.isqrt(display_num))
+    grid_rows = display_num // grid_cols
+    if grid_rows * grid_cols != display_num:
         print(
-            f"Error: --num {num_programs} is not evenly divisible by "
-            f"--grid-width {grid_cols}. Choose values where num = grid_width * k."
+            f"Error: --display-num {display_num} is not evenly divisible by "
+            f"--grid-width {grid_cols}. Choose values where display_num = grid_width * k."
         )
         sys.exit(1)
 
@@ -94,6 +105,7 @@ def main():
     params = cubff.SimulationParams()
     params.num_programs = num_programs
     params.seed = args.seed
+    params.eval_selfrep = True
     if args.mutation_prob > 0:
         params.mutation_prob = args.mutation_prob
 
@@ -103,7 +115,7 @@ def main():
     im = ax.imshow(blank, interpolation="nearest")
     ax.axis("off")
     title = ax.set_title(
-        f"lang={args.lang}  |  {num_programs} programs  |  Initializing..."
+        f"lang={args.lang}  |  {num_programs} programs (showing {display_num})  |  Initializing..."
     )
     plt.tight_layout()
     plt.ion()
@@ -116,7 +128,7 @@ def main():
         if lut is None:
             lut = np.frombuffer(state.byte_colors, dtype=np.uint8).reshape(256, 3)
 
-        image = _build_image(bytes(state.soup), lut, grid_cols, grid_rows, num_programs)
+        image = _build_image(bytes(state.soup), lut, grid_cols, grid_rows, display_num)
 
         selfrep_count = sum(
             1 for x in state.replication_per_prog if x >= cubff.kSelfrepThreshold
