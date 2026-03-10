@@ -342,6 +342,43 @@ size_t Simulation<Language>::EvalParsedSelfrep(std::vector<uint8_t> &parsed,
 }
 
 template <typename Language>
+std::vector<uint64_t> Simulation<Language>::EvaluatePairs(
+    std::vector<uint8_t>& soup, const std::vector<uint32_t>& pairs,
+    uint64_t seed, uint32_t mutation_prob) {
+#ifdef __CUDACC__
+  return {};  // CPU-only; not supported in CUDA mode.
+#else
+  size_t num_pairs = pairs.size() / 2;
+  std::vector<uint64_t> ops(num_pairs, 0);
+#pragma omp parallel for schedule(dynamic)
+  for (size_t i = 0; i < num_pairs; i++) {
+    uint8_t tape[2 * kSingleTapeSize] = {};
+    uint32_t p1 = pairs[2 * i];
+    uint32_t p2 = pairs[2 * i + 1];
+    for (size_t j = 0; j < kSingleTapeSize; j++) {
+      tape[j] = soup[p1 * kSingleTapeSize + j];
+      tape[j + kSingleTapeSize] = soup[p2 * kSingleTapeSize + j];
+    }
+    for (size_t j = 0; j < 2 * kSingleTapeSize; j++) {
+      uint64_t rng =
+          SplitMix64((num_pairs * seed + i) * 2 * kSingleTapeSize + j);
+      uint8_t repl = rng & 0xFF;
+      uint64_t prob_rng = (rng >> 8) & ((1ULL << 30) - 1);
+      if (prob_rng < mutation_prob) {
+        tape[j] = repl;
+      }
+    }
+    ops[i] = Language::Evaluate(tape, 8192, false);
+    for (size_t j = 0; j < kSingleTapeSize; j++) {
+      soup[p1 * kSingleTapeSize + j] = tape[j];
+      soup[p2 * kSingleTapeSize + j] = tape[j + kSingleTapeSize];
+    }
+  }
+  return ops;
+#endif
+}
+
+template <typename Language>
 void Simulation<Language>::RunSimulation(
     const SimulationParams &params, std::optional<std::string> initial_program,
     std::function<bool(const SimulationState &)> callback) const {

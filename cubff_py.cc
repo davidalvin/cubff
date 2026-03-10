@@ -97,9 +97,19 @@ PYBIND11_MODULE(cubff, m) {
       .def("RunSingleParsedProgram", &LanguageInterface::RunSingleParsedProgram)
       .def("EvalSelfrep", &LanguageInterface::EvalSelfrep)
       .def("EvalParsedSelfrep", &LanguageInterface::EvalParsedSelfrep)
-      .def("Parse", &LanguageInterface::Parse);
+      .def("Parse", &LanguageInterface::Parse)
+      .def("EvaluatePairs", &LanguageInterface::EvaluatePairs);
 
   m.def("GetLanguage", &GetLanguage, py::return_value_policy::reference);
+  m.def("ComputeBrotliBpb", [](const std::vector<uint8_t>& soup) {
+    size_t max_size = BrotliEncoderMaxCompressedSize(soup.size());
+    std::vector<uint8_t> compressed(max_size);
+    size_t compressed_size = max_size;
+    BrotliEncoderCompress(2, 24, BROTLI_MODE_GENERIC, soup.size(),
+                          soup.data(), &compressed_size, compressed.data());
+    double bpb = compressed_size * 8.0 / soup.size();
+    return std::make_pair(compressed_size, bpb);
+  });
   m.def("ResetColors", []() {
     printf("%s", ResetColors());
     fflush(stdout);
