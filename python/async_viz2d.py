@@ -26,6 +26,7 @@ import argparse
 import heapq
 import math
 import os
+import random
 import sys
 import time
 
@@ -98,6 +99,12 @@ def main():
         action="store_true",
         help="Sample and count self-replicators each epoch (slower)",
     )
+    parser.add_argument(
+        "--callback-interval",
+        type=int,
+        default=1,
+        help="Display update interval in epochs (default: 1). Set to 128 to match sync behaviour.",
+    )
     args = parser.parse_args()
 
     num_programs = args.num
@@ -168,13 +175,15 @@ def main():
 
     mutation_prob = params.mutation_prob
     steps_per_epoch = num_programs // K
+    display_every = args.callback_interval * steps_per_epoch
     global_step = 0
     epoch = 1  # Already completed 1 sync epoch.
     start_time = time.time()
 
     while True:
-        # Pop K lowest-timestamp programs and form K/2 pairs.
+        # Pop K lowest-timestamp programs, shuffle for random pairing, form K/2 pairs.
         batch = [heapq.heappop(heap) for _ in range(K)]
+        random.shuffle(batch)
         pairs_flat = [idx for _, idx in batch]
         pairs_vec = cubff.VectorUint32(pairs_flat)
 
@@ -188,9 +197,10 @@ def main():
             timestamps[idx] = new_ts
 
         global_step += 1
-
         if global_step % steps_per_epoch == 0:
             epoch += 1
+
+        if global_step % display_every == 0:
             soup_bytes = bytes(soup)
 
             # Brotli compression.
